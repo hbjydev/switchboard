@@ -11,8 +11,17 @@ COPY . .
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-${TARGETARCH}},sharing=locked \
     --mount=type=cache,target=/src/target,id=cargo-target-${TARGETARCH}},sharing=locked \
-    RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --locked --bin "switchboard" --target x86_64-unknown-linux-gnu && \
-		cp target/x86_64-unknown-linux-gnu/release/switchboard /usr/local/bin/switchboard
+    RUSTFLAGS="-C target-feature=+crt-static" \
+	cargo build --release --locked --bin="switchboard" --target="$(case ${TARGETARCH} in \
+		"amd64") echo "x86_64";; \
+		"arm64") echo "aarch64";; \
+		*) echo "${TARGETARCH}";; \
+	esac)-unknown-linux-gnu" && \
+		cp "target/$(case ${TARGETARCH} in \
+		"amd64") echo "x86_64";; \
+		"arm64") echo "aarch64";; \
+		*) echo "${TARGETARCH}";; \
+	esac)-unknown-linux-gnu/release/switchboard" /usr/local/bin/switchboard
 
 FROM rockylinux/rockylinux:10-ubi-micro AS runtime
 
@@ -22,7 +31,7 @@ ADD https://github.com/krallin/tini/releases/download/${TINI_VERSION}/tini /usr/
 
 RUN echo 'switchboard:x:10001:10001::/:/sbin/nologin' >> /etc/passwd \
     && echo 'switchboard:x:10001:' >> /etc/group \
-		&& chmod +x /usr/local/bin/tini
+	&& chmod +x /usr/local/bin/tini
 
 COPY --from=builder --chown=10001:10001 /usr/local/bin/switchboard /usr/local/bin/switchboard
 
