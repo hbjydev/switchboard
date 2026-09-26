@@ -1,0 +1,24 @@
+---
+name: Setup Repo
+inputs:
+  cache:
+    description: Enable caching
+    default: 'true'
+  rust:
+    description: Enable Rust caching
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Install Mise
+      uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
+      with:
+        cache: ${{ inputs.cache }}
+        env: true
+        experimental: true
+        export_path: true
+
+    - name: Rust cache
+      uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      if: ${{ inputs.cache == 'true' && inputs.rust == 'true' }}

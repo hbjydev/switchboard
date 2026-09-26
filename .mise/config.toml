@@ -1,0 +1,65 @@
+[settings.cargo]
+binstall = true
+binstall_native = true
+
+[env]
+_.file = ".env"
+RUST_BACKTRACE = "1"
+
+[tools]
+rust = "1.98.1"
+"cargo:cargo-deny" = "0.20.2"
+"cargo:cargo-machete" = "0.9.2"
+"cargo:cargo-nextest" = "0.9.146"
+"cargo:taplo-cli" = "0.10.0"
+"cargo:typos-cli" = "1.50.2"
+
+[tasks.build]
+description = "Build all of the released components of the workspace"
+run = "cargo build --package switchboard --release"
+
+[tasks.fmt]
+description = "Run rustfmt on the entire workspace"
+run = ["cargo fmt --all", "taplo fmt"]
+
+[tasks.check]
+description = "Run all CI checks locally"
+depends = ["lint", "test", "doc", "audit"]
+
+[tasks.lint]
+description = "Run fmt, clippy, typos, taplo, machete"
+run = [
+  "cargo fmt --all -- --check",
+  "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+  "cargo machete",
+  "taplo fmt --check",
+  "typos",
+]
+
+[tasks.test]
+description = "Run tests with nextest"
+run = "cargo nextest run --workspace --all-features --no-fail-fast"
+
+[tasks.audit]
+description = "Run cargo-deny checks"
+run = "cargo deny --all-features check"
+
+[tasks.doc]
+description = "Build docs with warnings as errors"
+env = { RUSTDOCFLAGS = "-D warnings" }
+run = "cargo doc --workspace --all-features --no-deps"
+
+[tasks.build-docker]
+description = "Build docker image for the API"
+env = { RUST_VERSION = { tools = true, value = "{{ tools.rust.version }}" } }
+usage = """
+arg "<bin>" help="The binary to build"
+flag "--tag <tag>" help="The tag to build the docker image with" default="dev"
+flag "--prefix <prefix>" help="The prefix to build the docker image with" default="ghcr.io/hbjydev/switchboard"
+"""
+run = """
+docker build . \
+  --build-arg RUST_VERSION=${RUST_VERSION} \
+  --file Dockerfile \
+  --tag "${usage_prefix}/api:${usage_tag}" \
+"""

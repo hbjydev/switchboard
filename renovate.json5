@@ -1,0 +1,99 @@
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+
+  extends: [
+    'config:recommended',
+    'docker:enableMajor',
+    'helpers:pinGitHubActionDigests',
+    ':disableRateLimiting',
+    ':dependencyDashboard',
+    ':automergePr',
+    ':semanticCommits',
+    ':skipStatusChecks',
+    ':timezone(Europe/London)',
+  ],
+
+  packageRules: [
+		// Grouping
+    {
+      description: 'Group all rust toolchain updates together',
+      groupName: 'rust toolchain',
+      matchPackageNames: [
+        '/rust/',
+      ],
+    },
+    {
+      description: 'Group dev tools installed via mise/cargo install',
+      matchPackageNames: [
+        '/^(cargo:)?(cargo-deny|cargo-machete|cargo-nextest|taplo-cli|typos-cli)$/',
+      ],
+      groupName: 'rust dev tools',
+    },
+
+		// Semantic Commit
+    {
+      "matchUpdateTypes": ["major"],
+      "semanticCommitType": "feat",
+      "commitMessagePrefix": "{{semanticCommitType}}({{semanticCommitScope}})!:",
+      "commitMessageExtra": "({{currentVersion}} → {{newVersion}})"
+    },
+    {
+      "matchUpdateTypes": ["minor"],
+      "semanticCommitType": "feat",
+      "commitMessageExtra": "({{currentVersion}} → {{newVersion}})"
+    },
+    {
+      "matchUpdateTypes": ["patch"],
+      "semanticCommitType": "fix",
+      "commitMessageExtra": "({{currentVersion}} → {{newVersion}})"
+    },
+    {
+      "matchUpdateTypes": ["digest"],
+      "semanticCommitType": "chore",
+      "commitMessageExtra": "({{currentDigestShort}} → {{newDigestShort}})"
+    },
+    {
+      "matchDatasources": ["docker"],
+      "semanticCommitScope": "container",
+      "commitMessageTopic": "image {{depName}}"
+    },
+    {
+      "matchManagers": ["github-actions"],
+      "semanticCommitType": "ci",
+      "semanticCommitScope": "github-action",
+      "commitMessageTopic": "action {{depName}}"
+    },
+    {
+      "matchDatasources": ["github-releases"],
+      "semanticCommitScope": "github-release",
+      "commitMessageTopic": "release {{depName}}"
+    },
+  ],
+
+	customManagers: [
+    {
+      customType: 'regex',
+      description: 'Process annotated dependencies',
+      managerFilePatterns: [
+        '/\\.env(?:\\.j2)?$/',
+        '/\\.sh(?:\\.j2)?$/',
+        '/\\.yaml(?:\\.j2)?$/',
+        '/(^|/)Dockerfile[^/]*$/'
+      ],
+      matchStrings: [
+        'datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\n.+(:\\s|=)(&\\S+\\s)?(?<currentValue>\\S+)'
+      ],
+      datasourceTemplate: '{{#if datasource}}{{{datasource}}}{{else}}github-releases{{/if}}'
+    },
+	]
+
+	timezone: 'Europe/London',
+  labels: ['dependencies'],
+  commitBodyTable: true,
+  rebaseWhen: 'auto',
+  platformCommit: 'enabled',
+  suppressNotifications: [
+    'prEditedNotification',
+    'prIgnoreNotification'
+  ]
+}

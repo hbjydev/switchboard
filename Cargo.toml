@@ -1,0 +1,105 @@
+[workspace]
+resolver = "3"
+members = ["crates/main"]
+
+[workspace.package]
+version = "0.1.0"
+license = "Apache-2.0"
+rust-version = "1.98"
+edition = "2024"
+repository = "https://github.com/hbjydev/switchboard"
+readme = "README.md"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+ambiguous_glob_reexports = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+string_slice = "deny"
+indexing_slicing = "deny"
+unwrap_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+get_unwrap = "deny"
+unwrap_in_result = "deny"
+unchecked_time_subtraction = "deny"
+panic_in_result_fn = "deny"
+
+let_underscore_future = "warn"
+let_underscore_must_use = "allow"
+unused_result_ok = "warn"
+map_err_ignore = "warn"
+assertions_on_result_states = "warn"
+unused_async_trait_impl = "allow"
+
+await_holding_lock = "warn"
+await_holding_refcell_ref = "warn"
+if_let_mutex = "warn"
+large_futures = "warn"
+
+mem_forget = "warn"
+undocumented_unsafe_blocks = "warn"
+multiple_unsafe_ops_per_block = "warn"
+unnecessary_safety_doc = "warn"
+unnecessary_safety_comment = "warn"
+
+float_cmp = "warn"
+float_cmp_const = "warn"
+lossy_float_literal = "warn"
+cast_sign_loss = "warn"
+invalid_upcast_comparisons = "warn"
+
+rc_mutex = "warn"
+debug_assert_with_mut_call = "warn"
+iter_not_returning_iterator = "warn"
+expl_impl_clone_on_copy = "warn"
+infallible_try_from = "warn"
+dbg_macro = "warn"
+
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[workspace.dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["macros"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros"] }
+tower-http = { version = "0.7", features = [
+  "cors",
+  "limit",
+  "request-id",
+  "timeout",
+  "trace",
+] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = [
+  "env-filter",
+  "fmt",
+  "json",
+] }
+utoipa = "5.5"
+uuid = { version = "1.26", features = ["v7"] }

@@ -1,0 +1,9 @@
+.git
+target
+.env
+.env.*
+.github
+.forgejo
+.vscode
+.idea
+.zed
