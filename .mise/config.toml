@@ -21,6 +21,42 @@ run = "rustup component add rustfmt clippy"
 description = "Build all of the released components of the workspace"
 run = "cargo build --package switchboard --release"
 
+[tasks.complexity]
+description = "Report every function above the cognitive-complexity threshold (clippy.toml; advisory)"
+run = '''
+set -eu
+echo "==> functions above the cognitive-complexity threshold (see clippy.toml)"
+cargo clippy --workspace --all-targets --all-features --locked -q -- -W clippy::cognitive_complexity 2>&1 \
+  | grep -A2 'cognitive complexity of' \
+  | grep -E 'cognitive complexity of|-->' \
+  || echo "none — everything is under the threshold"
+'''
+
+[tasks.complexity-check]
+description = "Ratchet gate: fail if the count of over-threshold functions grows"
+run = '''
+set -eu
+# RATCHET: the count of functions above the cognitive-complexity threshold
+# (clippy.toml, 25) must never GROW. This is a count budget with an
+# aspirational per-function threshold — not a permissive threshold sized to
+# the worst offender — so a NEW overly-complex function fails immediately
+# even while the legacy offenders are still being paid down. Refactored one
+# under the threshold? Lower BUDGET to match (the task reminds you).
+BUDGET=28
+COUNT=$(cargo clippy --workspace --all-targets --all-features --locked -q -- -W clippy::cognitive_complexity 2>&1 \
+  | grep -A1 'cognitive complexity of' | grep -oE '[-]{2}> [^ ]+' | sort -u | wc -l)
+echo "==> functions above the cognitive-complexity threshold: $COUNT (budget: $BUDGET)"
+if [ "$COUNT" -gt "$BUDGET" ]; then
+  echo "error: cognitive-complexity offenders grew ($COUNT > $BUDGET)." >&2
+  echo "Run 'mise run complexity' to list them; simplify the new function (extract" >&2
+  echo "pure, unit-testable helpers — the repo idiom) instead of raising BUDGET." >&2
+  exit 1
+fi
+if [ "$COUNT" -lt "$BUDGET" ]; then
+  echo "note: offenders dropped below the budget — ratchet BUDGET down to $COUNT in .mise/config.toml"
+fi
+'''
+
 [tasks.fmt]
 description = "Run rustfmt on the entire workspace"
 run = ["cargo fmt --all", "taplo fmt"]
@@ -41,6 +77,42 @@ run = [
 [tasks.test]
 description = "Run tests with nextest"
 run = "cargo nextest run --workspace --all-features --no-fail-fast"
+
+[tasks.test-archive]
+description = "Build the workspace ONCE (--all-features) and pack its tests for nextest"
+run = '''
+set -eu
+mkdir -p target/nextest
+
+cargo nextest archive --workspace --all-features --locked \
+    -E 'package(switchboard-e2e) & kind(test)' \
+    --archive-file "{{ config_root }}/target/nextest/e2e.tar.zst"
+
+cargo nextest archive --workspace --all-features --locked \
+    -E 'not (package(switchboard-e2e) & kind(test))' \
+    --archive-file "{{ config_root }}/target/nextest/workspace.tar.zst"
+
+cargo build --workspace --all-features --locked --bin switchboard
+
+cp target/debug/switchboard target/nextest/switchboard
+'''
+
+[tasks.test-from-archive]
+description = "Run tests from the pre-built archive `test-archive` built"
+run = '''
+cargo-nextest nextest run --profile ci --workspace-remap . \
+    --archive-file "{{ config_root }}/target/nextest/workspace.tar.zst" \
+    -E 'not binary(/^integration/)'
+'''
+
+[tasks.test-int-from-archive]
+description = "Run integration tests from the pre-built archive `test-archive` built"
+run = '''
+cargo-nextest nextest run --profile ci --workspace-remap . \
+    --archive-file "{{ config_root }}/target/nextest/workspace.tar.zst" \
+    --run-ignored all \
+    -E 'binary(/^integration/)'
+'''
 
 [tasks.audit]
 description = "Run cargo-deny checks"

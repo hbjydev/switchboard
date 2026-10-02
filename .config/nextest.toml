@@ -1,0 +1,6 @@
+[profile.ci]
+fail-fast = false
+
+[profile.e2e]
+retries = 2
+test-threads = 1

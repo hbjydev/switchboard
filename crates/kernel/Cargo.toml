@@ -11,8 +11,12 @@ publish.workspace = true
 [dependencies]
 switchboard-uuids.workspace = true
 
+thiserror.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+integration = []
