@@ -68,6 +68,7 @@ jobs:
           compression-level: 0
 
   rust-test:
+    needs: rust-build
     if: >-
       ${{ !(startsWith(github.head_ref, 'release-please--')
       && github.event.pull_request.head.repo.full_name == github.repository) }}
@@ -84,6 +85,7 @@ jobs:
       - run: mise run test-from-archive
 
   integration-test:
+    needs: rust-build
     if: >-
       ${{ !(startsWith(github.head_ref, 'release-please--')
       && github.event.pull_request.head.repo.full_name == github.repository) }}
