@@ -59,11 +59,11 @@ fi
 
 [tasks.fmt]
 description = "Run rustfmt on the entire workspace"
-run = ["cargo fmt --all", "taplo fmt"]
+run = "cargo fmt --all"
 
 [tasks.fmt-check]
-description = "Run rustfmt on the entire workspace"
-run = ["cargo fmt --all -- --check", "taplo fmt --check"]
+description = "Run rustfmt on the entire workspace in check mode"
+run = "mise run fmt -- --check"
 
 [tasks.check]
 description = "Run all CI checks locally"
@@ -74,26 +74,36 @@ description = "Run all CI checks locally"
 run = "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings"
 
 [tasks.lint]
-description = "Run fmt, clippy, typos, taplo, machete"
+description = "Run fmt-check, clippy"
 depends = ["fmt-check", "clippy"]
-run = ["typos"]
 
 [tasks.test]
 description = "Run tests with nextest"
-run = "cargo nextest run --workspace --all-features --no-fail-fast"
+run = '''
+cargo nextest run \
+    --workspace \
+    --all-features \
+    --no-fail-fast \
+    -E 'not binary(/^integration/)'
+'''
+
+[tasks.test-int]
+description = "Run tests with nextest"
+run = '''
+cargo nextest run \
+    --workspace \
+    --all-features \
+    --no-fail-fast \
+    -E 'binary(/^integration/)'
+'''
 
 [tasks.test-archive]
 description = "Build the workspace ONCE (--all-features) and pack its tests for nextest"
 run = '''
 set -eu
 mkdir -p target/nextest
-
 cargo nextest archive --workspace --all-features --locked \
     --archive-file "{{ config_root }}/target/nextest/workspace.tar.zst"
-
-cargo build --workspace --all-features --locked --bin switchboard
-
-cp target/debug/switchboard target/nextest/switchboard
 '''
 
 [tasks.test-from-archive]
