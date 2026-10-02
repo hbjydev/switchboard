@@ -4,6 +4,7 @@ binstall_native = true
 
 [env]
 _.file = ".env"
+CARGO_TERM_COLOR = "always"
 RUST_BACKTRACE = "1"
 
 [tools]
