@@ -76,9 +76,7 @@ run = "cargo clippy --workspace --all-targets --all-features --locked -- -D warn
 [tasks.lint]
 description = "Run fmt, clippy, typos, taplo, machete"
 depends = ["fmt-check", "clippy"]
-run = [
-  "typos",
-]
+run = ["typos"]
 
 [tasks.test]
 description = "Run tests with nextest"
