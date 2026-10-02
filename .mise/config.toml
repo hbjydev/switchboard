@@ -69,12 +69,14 @@ run = ["cargo fmt --all -- --check", "taplo fmt --check"]
 description = "Run all CI checks locally"
 depends = ["lint", "test", "doc", "audit"]
 
+[tasks.clippy]
+description = "Run all CI checks locally"
+run = "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings"
+
 [tasks.lint]
 description = "Run fmt, clippy, typos, taplo, machete"
+depends = ["fmt-check", "clippy"]
 run = [
-  "cargo fmt --all -- --check",
-  "cargo clippy --workspace --all-targets --all-features -- -D warnings",
-  "taplo fmt --check",
   "typos",
 ]
 

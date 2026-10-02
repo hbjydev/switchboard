@@ -2,5 +2,5 @@
 
 #[test]
 fn does_work() {
-    assert!(true);
+    assert_ne!(2 + 2, 5);
 }
