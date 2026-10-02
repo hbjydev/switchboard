@@ -61,6 +61,10 @@ fi
 description = "Run rustfmt on the entire workspace"
 run = ["cargo fmt --all", "taplo fmt"]
 
+[tasks.fmt-check]
+description = "Run rustfmt on the entire workspace"
+run = ["cargo fmt --all -- --check", "taplo fmt --check"]
+
 [tasks.check]
 description = "Run all CI checks locally"
 depends = ["lint", "test", "doc", "audit"]
