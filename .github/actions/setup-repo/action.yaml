@@ -1,5 +1,6 @@
 ---
 name: Setup Repo
+description: Install Mise tools and configure Rust caching and components
 inputs:
   cache:
     description: Enable caching

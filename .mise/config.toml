@@ -19,8 +19,12 @@ description = "Install Rust components required by project tasks"
 run = "rustup component add rustfmt clippy"
 
 [tasks.build]
-description = "Build all of the released components of the workspace"
-run = "cargo build --package switchboard --release"
+description = "Build all of the components of the workspace"
+run = "cargo build --workspace --all-targets --all-features --locked"
+
+[tasks.build-release]
+description = "Build all of the released binaries of the workspace"
+run = "cargo build --workspace --release --locked --bin switchboard"
 
 [tasks.complexity]
 description = "Report every function above the cognitive-complexity threshold (clippy.toml; advisory)"
