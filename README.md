@@ -150,7 +150,7 @@ and returns generated text without storing messages. Requests carry the selected
 ordered messages with speaker IDs, names, content, and an acting-agent flag.
 Duplicate names never collapse identities, and another agent's messages remain
 attributed to that agent. Participant text, including role-like labels, remains
-conversation data; provider role mapping belongs in a future real adapter.
+conversation data; provider role mapping lives in the OpenAI adapter described below.
 
 The caller supplies the inclusive history through the triggering message and
 resolves both current participants and historical speakers. Projection preserves
@@ -187,3 +187,66 @@ semantics. Durable idempotency, transactional outbox delivery, and worker claims
 are required before operating persistent concurrent workers. Conversation
 membership and agent configuration are read at processing time rather than
 historically versioned at the trigger.
+
+The OpenAI adapter uses the [Responses API](https://developers.openai.com/api/docs/guides/text)
+through a small Rustls-backed HTTP client. Run a one-shot real-model conversation:
+
+```sh
+# Set OPENAI_API_KEY in your shell or the Mise-loaded .env file first.
+mise exec -- cargo run -p switchboard -- openai --model YOUR_MODEL_ID --message "Hello!"
+```
+
+There is no default commercial model. `OPENAI_MODEL` can replace `--model`.
+`--instructions` supplies the agent definition's instructions. The API key is
+read only from `OPENAI_API_KEY`, never a CLI argument. `--timeout-seconds`
+(or `OPENAI_TIMEOUT_SECONDS`) defaults to 60 and must be positive. Ctrl-C cancels
+the adapter's pending generation, returning a nonzero exit status. The fake
+`demo` command remains credential-free. Both commands still use fresh in-memory
+repositories; the OpenAI command is not a persistent server or interactive chat.
+
+`OpenAiConfig::new` validates the API key and timeout; `OpenAiModel::new` constructs
+the adapter. `--base-url` / `OPENAI_BASE_URL` optionally overrides the API prefix
+(default `https://api.openai.com/v1`); `/responses` is appended. URLs must use HTTPS
+or loopback HTTP and contain no credentials, query, or fragment. The configured
+endpoint receives the API key. Redirects are disabled, and errors contain neither
+credentials nor provider response bodies.
+
+Provider mapping is relative to the acting peer: only its own previous messages
+use the assistant role; humans, services, and other agents use the user role.
+An initial user input contains participant context and the acting peer ID. Each
+history message carries JSON-encoded speaker ID, message ID, display name, and
+original text, preserving duplicate names and departed speakers. Only configured
+instructions populate the API's `instructions` field. Participant names, roles,
+and role-like text stay input data. This encodes identity and instruction priority;
+it is not a guarantee that a model will resist every prompt injection.
+
+Requests include the entire supplied history, use `store: false`, and do not use
+provider conversation IDs or `previous_response_id`. The adapter reads all
+assistant `output_text` parts in order, ignoring reasoning items. It rejects
+incomplete, malformed, empty, refused, or unsupported output instead of publishing
+a partial reply. Streaming, tool calls, images, and reasoning-state replay are
+outside this adapter's current text-only scope.
+
+`ModelError` distinguishes invalid requests, authentication/authorization,
+rate limits, provider unavailability, timeout, cancellation, invalid responses,
+and refusal. There are no automatic HTTP retries. The application processor
+retains the original human message on failure and permits an explicit retry;
+successful activations retain existing process-local deduplication semantics.
+The CLI exits on failure, so its ephemeral state cannot be retried in another
+invocation. HTTP timeout covers generation through response-body decoding.
+
+`OpenAiModel::cancellation_token()` returns an adapter-lifecycle shutdown token:
+cancelling it stops all current and future generations on that instance. Create
+a new adapter for a new lifecycle. Dropping a generation future also stops local
+waiting. Cancellation or timeout does not guarantee that the provider stops
+remote computation, and interrupted publication retains the foundation's existing
+idempotency limitations.
+
+Adapter tests use an ephemeral loopback mock server with dummy credentials. They
+check the HTTP schema, identity/role mapping, typed errors, response parsing,
+timeouts, cancellation, and application retry/deduplication. No test calls OpenAI
+or reads the user's API key:
+
+```sh
+mise exec -- cargo test -p switchboard-infrastructure --test openai --locked
+```

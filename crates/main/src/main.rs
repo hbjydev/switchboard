@@ -1,4 +1,8 @@
+use anyhow::Context;
 use std::io::{IsTerminal, Write};
+use std::{sync::Arc, time::Duration};
+use switchboard_agent::ModelRef;
+use switchboard_infrastructure::openai::{OpenAiConfig, OpenAiModel};
 
 mod demo;
 
@@ -19,6 +23,20 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Run a one-shot conversation through the `OpenAI` Responses API.
+    Openai {
+        #[arg(long, env = "OPENAI_MODEL")]
+        model: String,
+        #[arg(long, default_value = "Hello, Switchboard!")]
+        message: String,
+        #[arg(long, env = "OPENAI_TIMEOUT_SECONDS", default_value_t = 60)]
+        timeout_seconds: u64,
+        /// API prefix; HTTPS or loopback HTTP. Defaults to `OpenAI`'s /v1 endpoint.
+        #[arg(long, env = "OPENAI_BASE_URL")]
+        base_url: Option<String>,
+        #[arg(long, default_value = "Respond helpfully to the conversation.")]
+        instructions: String,
+    },
     /// Run a local human/agent conversation using an in-memory fake model.
     Demo {
         /// Human message to send to the agent.
@@ -46,6 +64,17 @@ async fn main() -> anyhow::Result<()> {
     init_tracing(&args.log_format.unwrap_or_default());
 
     match args.command {
+        Command::Openai {
+            model,
+            message,
+            timeout_seconds,
+            base_url,
+            instructions,
+        } => {
+            let transcript =
+                run_openai(model, message, timeout_seconds, base_url, instructions).await?;
+            std::io::stdout().lock().write_all(transcript.as_bytes())?;
+        }
         Command::Demo { message } => {
             let transcript = demo::run(message).await?;
             std::io::stdout().lock().write_all(transcript.as_bytes())?;
@@ -53,6 +82,41 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+async fn run_openai(
+    model: String,
+    message: String,
+    timeout_seconds: u64,
+    base_url: Option<String>,
+    instructions: String,
+) -> anyhow::Result<String> {
+    anyhow::ensure!(!model.trim().is_empty(), "OpenAI model must be nonblank");
+    let api_key = std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY is required")?;
+    let mut config = OpenAiConfig::new(&api_key, Duration::from_secs(timeout_seconds))?;
+    if let Some(base_url) = base_url {
+        config = config.with_base_url(&base_url)?;
+    }
+    let adapter = Arc::new(OpenAiModel::new(config)?);
+    let cancellation = adapter.cancellation_token();
+    let conversation = demo::run_with_model(
+        message,
+        adapter,
+        ModelRef {
+            provider: "openai".into(),
+            model,
+        },
+        instructions,
+    );
+    tokio::pin!(conversation);
+    tokio::select! {
+        result = &mut conversation => result,
+        signal = tokio::signal::ctrl_c() => {
+            signal.context("registering Ctrl-C handler")?;
+            cancellation.cancel();
+            conversation.await
+        }
+    }
 }
 
 fn init_tracing(format: &LogFormat) {

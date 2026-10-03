@@ -1,7 +1,7 @@
 //! Composition for the local demo, executed through the switchboard binary.
 use anyhow::{Context, Result};
 use std::{fmt::Write, sync::Arc};
-use switchboard_agent::{AgentDefinition, ModelRef, runtime::AgentRuntime};
+use switchboard_agent::{AgentDefinition, ModelRef, model::LanguageModel, runtime::AgentRuntime};
 use switchboard_application::{
     messaging::{SendMessage, SendMessageRequest},
     processing::ActivationProcessor,
@@ -21,6 +21,24 @@ use switchboard_kernel::{
 };
 
 pub async fn run(text: String) -> Result<String> {
+    run_with_model(
+        text,
+        Arc::new(FakeModel::default()),
+        ModelRef {
+            provider: "fake".into(),
+            model: "deterministic".into(),
+        },
+        "Respond helpfully to the conversation.".into(),
+    )
+    .await
+}
+
+pub async fn run_with_model(
+    text: String,
+    model: Arc<dyn LanguageModel>,
+    model_ref: ModelRef,
+    instructions: String,
+) -> Result<String> {
     let peers = Arc::new(InMemoryPeerRepository::default());
     let conversations = Arc::new(InMemoryConversationRepository::default());
     let messages = Arc::new(InMemoryMessageRepository::default());
@@ -33,14 +51,7 @@ pub async fn run(text: String) -> Result<String> {
     let conversation = Conversation::new([human.id(), agent.id()]);
     conversations.save(conversation.clone()).await?;
     agents
-        .save(AgentDefinition::new(
-            &agent,
-            "Respond helpfully to the conversation.",
-            ModelRef {
-                provider: "fake".into(),
-                model: "deterministic".into(),
-            },
-        )?)
+        .save(AgentDefinition::new(&agent, instructions, model_ref)?)
         .await?;
     let sender = SendMessage::new(peers.clone(), conversations.clone(), messages.clone());
     let mut processor = ActivationProcessor::new(
@@ -48,7 +59,7 @@ pub async fn run(text: String) -> Result<String> {
         conversations,
         messages.clone(),
         agents,
-        AgentRuntime::new(Arc::new(FakeModel::default())),
+        AgentRuntime::new(model),
     );
     let sent = sender
         .execute(SendMessageRequest {

@@ -40,6 +40,14 @@ pub struct GenerationResponse {
 pub enum ModelError {
     #[error("model unavailable")]
     Unavailable,
+    #[error("model authentication or authorization failed")]
+    Unauthorized,
+    #[error("model rate limit exceeded")]
+    RateLimited,
+    #[error("model returned an invalid or incomplete response")]
+    InvalidResponse,
+    #[error("model refused the request")]
+    Refused,
     #[error("model request is invalid")]
     InvalidRequest,
     #[error("model generation timed out")]

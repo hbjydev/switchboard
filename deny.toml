@@ -11,7 +11,14 @@ ignore = []
 version = 2
 confidence-threshold = 0.9
 allow = ["Apache-2.0", "MIT", "Unicode-3.0", "Unlicense"]
-exceptions = []
+# Required by the Rustls HTTPS adapter; keep allowances scoped to its dependencies.
+exceptions = [
+  { name = "ring", allow = ["ISC"] },
+  { name = "rustls-webpki", allow = ["ISC"] },
+  { name = "untrusted", allow = ["ISC"] },
+  { name = "subtle", allow = ["BSD-3-Clause"] },
+  { name = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+]
 
 [bans]
 multiple-versions = "warn"
