@@ -83,6 +83,12 @@ jobs:
           name: nextest-workspace
           path: target/nextest
       - run: mise run test-from-archive
+      - uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: Hermetic Tests
+          path: target/nextest/ci/junit.xml
+          reporter: java-junit
 
   integration-test:
     needs: rust-build
@@ -100,6 +106,12 @@ jobs:
           name: nextest-workspace
           path: target/nextest
       - run: mise run test-int-from-archive
+      - uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: Integration Tests
+          path: target/nextest/ci/junit.xml
+          reporter: java-junit
 
   cargo-audit:
     if: >-
