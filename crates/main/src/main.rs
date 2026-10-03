@@ -1,24 +1,30 @@
-use std::{io::IsTerminal, net::SocketAddr};
+use std::io::{IsTerminal, Write};
 
-use clap::{Parser, ValueEnum};
+mod demo;
+
+use clap::{Parser, Subcommand, ValueEnum};
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Switchboard is a persistent agentic AI gateway.
 #[derive(Parser)]
 struct Args {
-    /// The address to bind the server to.
-    #[clap(
-        long,
-        short,
-        env = "SWITCHBOARD_BIND_ADDR",
-        default_value = "0.0.0.0:8080"
-    )]
-    bind_addr: SocketAddr,
+    #[command(subcommand)]
+    command: Command,
 
     /// The log format to use.
-    #[clap(long, short = 'L', env = "SWITCHBOARD_LOG_FORMAT")]
+    #[clap(long, short = 'L', env = "SWITCHBOARD_LOG_FORMAT", global = true)]
     log_format: Option<LogFormat>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Run a local human/agent conversation using an in-memory fake model.
+    Demo {
+        /// Human message to send to the agent.
+        #[arg(long, default_value = "Hello, Switchboard!")]
+        message: String,
+    },
 }
 
 #[derive(Default, ValueEnum, Clone, Debug)]
@@ -35,11 +41,16 @@ enum LogFormat {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), String> {
+async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     init_tracing(&args.log_format.unwrap_or_default());
 
-    tracing::info!("Hello, world!");
+    match args.command {
+        Command::Demo { message } => {
+            let transcript = demo::run(message).await?;
+            std::io::stdout().lock().write_all(transcript.as_bytes())?;
+        }
+    }
 
     Ok(())
 }
@@ -53,6 +64,7 @@ fn init_tracing(format: &LogFormat) {
         match format {
             LogFormat::Compact => Box::new(
                 tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
                     .with_file(false)
                     .with_line_number(false)
                     .with_ansi(std::io::stderr().is_terminal())
@@ -62,13 +74,19 @@ fn init_tracing(format: &LogFormat) {
 
             LogFormat::Pretty => Box::new(
                 tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
                     .with_file(false)
                     .with_line_number(false)
                     .with_ansi(std::io::stderr().is_terminal())
                     .pretty(),
             ),
 
-            LogFormat::Json => Box::new(tracing_subscriber::fmt::layer().with_ansi(false).json()),
+            LogFormat::Json => Box::new(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_ansi(false)
+                    .json(),
+            ),
         };
 
     tracing_subscriber::registry()

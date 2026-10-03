@@ -26,72 +26,126 @@ env:
   RUST_BACKTRACE: '1'
 
 jobs:
-  fmt:
+  rust-lint:
     if: >-
       ${{ !(startsWith(github.head_ref, 'release-please--')
       && github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-repo
-      - run: cargo fmt --all -- --check
+      - run: mise run fmt-check
+      - run: mise run clippy
+      - name: Run doctests
+        run: cargo test --doc --workspace --all-features --locked
 
-  lint:
+  rust-build:
     if: >-
       ${{ !(startsWith(github.head_ref, 'release-please--')
       && github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-repo
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: mise run test-archive
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nextest-e2e
+          path: |
+            target/nextest/e2e.tar.zst
+            target/nextest/switchboard
+          retention-days: 1
+          compression-level: 1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nextest-workspace
+          path: target/nextest/workspace.tar.zst
+          retention-days: 1
+          compression-level: 0
 
-  test:
+  rust-test:
+    needs: rust-build
     if: >-
       ${{ !(startsWith(github.head_ref, 'release-please--')
       && github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-repo
-      - run: cargo nextest run --workspace --all-features --no-fail-fast
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nextest-workspace
+          path: target/nextest
+      - run: mise run test-from-archive
+      - uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: Hermetic Tests
+          path: target/nextest/ci/junit.xml
+          reporter: java-junit
 
-  rustdoc:
+  integration-test:
+    needs: rust-build
     if: >-
       ${{ !(startsWith(github.head_ref, 'release-please--')
       && github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-repo
-      - run: cargo doc --workspace --all-features --no-deps
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nextest-workspace
+          path: target/nextest
+      - run: mise run test-int-from-archive
+      - uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: Integration Tests
+          path: target/nextest/ci/junit.xml
+          reporter: java-junit
 
-  audit:
+  cargo-audit:
     if: >-
       ${{ !(startsWith(github.head_ref, 'release-please--')
       && github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-repo
-      - run: cargo deny --all-features check
+      - run: mise run audit
 
-  taplo:
-    if: >-
-      ${{ !(startsWith(github.head_ref, 'release-please--')
-      && github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: ubuntu-latest
+  status:
+    if: ${{ !cancelled() }}
+    name: Build Success
+    needs:
+      - cargo-audit
+      - integration-test
+      - rust-build
+      - rust-lint
+      - rust-test
+    runs-on: ubuntu-26.04
+    permissions: {}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ./.github/actions/setup-repo
-      - run: taplo fmt --check
+      # cancelled counts as failed: !cancelled() above still runs this job when
+      # individual needs were cancelled but the run was not, and a required job
+      # that never reached a verdict must not clear the merge gate. The e2e
+      # matrix is fail-fast: false across seventeen shards, so a superseded push
+      # cancelling them is the common case, not a corner one.
+      - name: Any jobs failed?
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: |
+          exit 1
 
-  typos:
-    if: >-
-      ${{ !(startsWith(github.head_ref, 'release-please--')
-      && github.event.pull_request.head.repo.full_name == github.repository) }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ./.github/actions/setup-repo
-      - run: typos
+      - name: All jobs passed or skipped?
+        if: ${{ !(contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')) }}
+        run: |
+          echo "All jobs passed or skipped" && echo "${{ toJSON(needs.*.result) }}"
