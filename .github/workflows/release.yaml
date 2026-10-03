@@ -47,20 +47,20 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu
-            arch: x86
+          - os: linux
+            arch: amd64
             runs: ubuntu-26.04
-          - os: ubuntu
-            arch: arm
+          - os: linux
+            arch: aarch64
             runs: ubuntu-26.04-arm
           - os: macos
-            arch: arm
+            arch: aarch64
             runs: macos-26
           - os: windows
-            arch: x86
+            arch: amd64
             runs: windows-2025
           - os: windows
-            arch: arm
+            arch: aarch64
             runs: windows-11-arm
     permissions:
       contents: write
