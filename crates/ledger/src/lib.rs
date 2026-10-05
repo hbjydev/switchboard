@@ -25,10 +25,14 @@ pub enum Error {
     EmptyField(&'static str),
     #[error("peer name already belongs to a different kind")]
     PeerKindConflict,
+    #[error("authenticated identity is already bound to a different peer kind")]
+    IdentityKindConflict,
     #[error("execution attempt {0} has lost its lease or authority")]
     ExecutionLost(AttemptId),
     #[error("lease duration must be between 3 milliseconds and 1 day")]
     InvalidLeaseDuration,
+    #[error("Ledger schema is incompatible; run switchboard migrate before serve")]
+    SchemaNotReady,
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -51,6 +55,37 @@ impl Ledger {
     pub async fn migrate(&self) -> Result<()> {
         sqlx::migrate!("../../migrations").run(&self.pool).await?;
         Ok(())
+    }
+    /// Read-only connectivity and migration compatibility check. Never migrates.
+    pub async fn check_ready(&self) -> Result<()> {
+        let check = async {
+            let applied: Vec<(i64, Vec<u8>, bool)> = sqlx::query_as(
+                "SELECT version,checksum,success FROM _sqlx_migrations ORDER BY version",
+            )
+            .fetch_all(&self.pool)
+            .await?;
+            let migrations = sqlx::migrate!("../../migrations");
+            let expected: Vec<_> = migrations.iter().collect();
+            if applied.len() != expected.len()
+                || applied
+                    .iter()
+                    .zip(expected)
+                    .any(|((version, checksum, success), migration)| {
+                        !success
+                            || *version != migration.version
+                            || checksum.as_slice() != migration.checksum.as_ref()
+                    })
+            {
+                return Err(Error::SchemaNotReady);
+            }
+            // Resolve required tables and columns without loading any work.
+            sqlx::query("SELECT i.current_attempt_id,a.lease_expires_at,p.kind,e.event_type,d.dependency_id,auth.subject FROM issues i LEFT JOIN execution_attempts a ON false LEFT JOIN peers p ON false LEFT JOIN issue_events e ON false LEFT JOIN issue_dependencies d ON false LEFT JOIN authenticated_identities auth ON false LIMIT 0")
+                .execute(&self.pool).await?;
+            Ok(())
+        };
+        tokio::time::timeout(Duration::from_secs(3), check)
+            .await
+            .map_err(|_elapsed| Error::Database(sqlx::Error::PoolTimedOut))?
     }
     // Graph changes and lifecycle changes share one lock. Claims take its shared
     // form, then row locks: concurrent claimers still use SKIP LOCKED independently.
@@ -78,6 +113,52 @@ impl Ledger {
             .bind(id)
             .fetch_optional(&self.pool)
             .await?)
+    }
+
+    /// Bind a verified external subject to a durable Peer. Caller-supplied names
+    /// and mutable profile claims never choose this identity or its Peer kind.
+    pub async fn ensure_authenticated_peer(
+        &self,
+        issuer: &str,
+        subject: &str,
+        kind: PeerKind,
+    ) -> Result<Peer> {
+        nonempty(issuer, "identity issuer")?;
+        nonempty(subject, "identity subject")?;
+        let mut tx = self.pool.begin().await?;
+        // Separate from the graph lock; release this before lifecycle operations.
+        // Serializing first bindings prevents duplicate/orphan Peer creation.
+        sqlx::query("SELECT pg_advisory_xact_lock(741933)")
+            .execute(&mut *tx)
+            .await?;
+        let existing: Option<Peer> = sqlx::query_as("SELECT p.* FROM peers p JOIN authenticated_identities a ON a.peer_id=p.id WHERE a.issuer=$1 AND a.subject=$2")
+            .bind(issuer).bind(subject).fetch_optional(&mut *tx).await?;
+        let peer = if let Some(peer) = existing {
+            if peer.kind != kind {
+                return Err(Error::IdentityKindConflict);
+            }
+            peer
+        } else {
+            let id = PeerId(Uuid::new_v4());
+            let peer =
+                sqlx::query_as("INSERT INTO peers(id,name,kind) VALUES ($1,$2,$3) RETURNING *")
+                    .bind(id)
+                    .bind(format!("authenticated:{id}"))
+                    .bind(kind)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            sqlx::query(
+                "INSERT INTO authenticated_identities(issuer,subject,peer_id) VALUES ($1,$2,$3)",
+            )
+            .bind(issuer)
+            .bind(subject)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+            peer
+        };
+        tx.commit().await?;
+        Ok(peer)
     }
     /// Human work intake. Execution-generated work uses `create_child_for_attempt`.
     pub async fn create_issue(&self, actor: PeerId, new: NewIssue) -> Result<Issue> {

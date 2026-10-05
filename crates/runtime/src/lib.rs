@@ -130,13 +130,22 @@ impl<E: AgentBackend> Worker<E> {
         if cancellation.is_cancelled() {
             return Ok(None);
         }
-        self.ledger.recover_expired_attempts().await?;
-        let Some(claim) = self.ledger.claim_next_issue(self.agent.peer_id).await? else {
+        let _cancel_on_drop = backend::CancelOnDrop(cancellation.clone());
+        let claim = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Ok(None),
+            claim = self.recover_and_claim(&cancellation) => claim?,
+        };
+        let Some(claim) = claim else {
             return Ok(None);
         };
         let attempt_id = claim.attempt.id;
-        let issue = self.ledger.mark_running(attempt_id).await?;
-        let _cancel_on_drop = backend::CancelOnDrop(cancellation.clone());
+        let issue = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return Err(ledger::Error::ExecutionLost(attempt_id)),
+            issue = self.ledger.mark_running(attempt_id) => issue?,
+        };
+        tracing::info!(%attempt_id, issue_id = %issue.id, "execution started");
         let execution = async {
             let request = self.load_request(&issue, attempt_id).await?;
             Ok::<_, ledger::Error>(self.executor.execute(request, cancellation.clone()).await)
@@ -151,8 +160,17 @@ impl<E: AgentBackend> Worker<E> {
         let outcome = loop {
             tokio::select! {
                 biased;
+                () = cancellation.cancelled() => {
+                    let _ = tokio::time::timeout(Duration::from_secs(5), &mut execution).await;
+                    return Err(ledger::Error::ExecutionLost(attempt_id));
+                }
                 _ = heartbeats.tick() => {
-                    if let Err(error) = self.ledger.heartbeat(attempt_id).await {
+                    let renewal = tokio::select! {
+                        biased;
+                        () = cancellation.cancelled() => Err(ledger::Error::ExecutionLost(attempt_id)),
+                        renewal = self.ledger.heartbeat(attempt_id) => renewal,
+                    };
+                    if let Err(error) = renewal {
                         cancellation.cancel();
                         // Give a cooperative backend time to abort and reap. On timeout,
                         // dropping its future still triggers the process supervisor.
@@ -160,15 +178,25 @@ impl<E: AgentBackend> Worker<E> {
                         return Err(error);
                     }
                 }
-                () = cancellation.cancelled() => {
-                    let _ = tokio::time::timeout(Duration::from_secs(5), &mut execution).await;
-                    return Err(ledger::Error::ExecutionLost(attempt_id));
-                }
                 result = &mut execution => break result?,
             }
         };
 
+        if cancellation.is_cancelled() {
+            return Err(ledger::Error::ExecutionLost(attempt_id));
+        }
         self.apply_result(&issue, attempt_id, outcome).await
+    }
+
+    async fn recover_and_claim(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<ledger::Claim>, ledger::Error> {
+        self.ledger.recover_expired_attempts().await?;
+        if cancellation.is_cancelled() {
+            return Ok(None);
+        }
+        self.ledger.claim_next_issue(self.agent.peer_id).await
     }
 
     async fn load_request(

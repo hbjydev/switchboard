@@ -1,0 +1,1 @@
+{"kty": "EC", "crv": "P-256", "alg": "ES256", "use": "sig", "key_ops": ["verify"], "kid": "ec-fixture", "x": "i_6m6G2WX_azOxHmZUuFAHUCGWcmVf6w-XyMU1fNyM4", "y": "KNsHinUlEXVqzW1dYamX9foPBVRA7VdAFxpGSw6hUas"}
