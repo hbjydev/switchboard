@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ledger", "crates/runtime"]
+members = ["crates/ledger", "crates/runtime", "crates/control-plane"]
 
 [workspace.package]
 version = "0.1.0"
@@ -21,11 +21,26 @@ publish.workspace = true
 [dependencies]
 ledger.workspace = true
 runtime.workspace = true
+control-plane.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tokio.workspace = true
 serde_json.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+axum.workspace = true
+base64.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+jsonwebtoken.workspace = true
+url.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+testcontainers-modules.workspace = true
+sqlx.workspace = true
 
 [lints]
 workspace = true
@@ -102,12 +117,21 @@ panic = "abort"
 [workspace.dependencies]
 ledger = { path = "crates/ledger" }
 runtime = { path = "crates/runtime" }
+control-plane = { path = "crates/control-plane" }
+axum = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tower = { version = "0.5", features = ["util"] }
+subtle = "2.6"
+jsonwebtoken = "9.3"
+base64 = "0.22"
+sha2 = "0.10"
+url = "2.5"
 anyhow = "1.0"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
-tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "time", "signal", "process", "io-util", "sync"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "time", "signal", "process", "io-util", "sync", "net"] }
 uuid = { version = "1.26", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "uuid", "chrono", "json", "macros", "migrate"] }

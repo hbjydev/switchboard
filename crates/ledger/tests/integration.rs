@@ -4,6 +4,69 @@ mod support;
 use support::TestDatabase;
 
 #[tokio::test]
+async fn authenticated_identity_binding_is_stable_atomic_and_kind_preserving() {
+    let database = TestDatabase::start().await.unwrap();
+    let ledger = Ledger::from_pool(database.pool.clone());
+    let (first, second) = tokio::join!(
+        ledger.ensure_authenticated_peer(
+            "https://issuer.example.test",
+            "immutable-subject",
+            PeerKind::Human
+        ),
+        ledger.ensure_authenticated_peer(
+            "https://issuer.example.test",
+            "immutable-subject",
+            PeerKind::Human
+        )
+    );
+    let first = first.unwrap();
+    let second = second.unwrap();
+    assert_eq!(first.id, second.id);
+    let restarted = Ledger::from_pool(database.pool.clone());
+    assert_eq!(
+        restarted
+            .ensure_authenticated_peer(
+                "https://issuer.example.test",
+                "immutable-subject",
+                PeerKind::Human
+            )
+            .await
+            .unwrap()
+            .id,
+        first.id
+    );
+    let different_issuer = ledger
+        .ensure_authenticated_peer(
+            "https://other.example.test",
+            "immutable-subject",
+            PeerKind::Human,
+        )
+        .await
+        .unwrap();
+    assert_ne!(first.id, different_issuer.id);
+    assert!(matches!(
+        ledger
+            .ensure_authenticated_peer(
+                "https://issuer.example.test",
+                "immutable-subject",
+                PeerKind::Agent
+            )
+            .await,
+        Err(Error::IdentityKindConflict)
+    ));
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM authenticated_identities")
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    let peers: i64 = sqlx::query_scalar("SELECT count(*) FROM peers")
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+    assert_eq!(peers, 2);
+}
+
+#[tokio::test]
 async fn lifecycle_and_history() {
     let database = TestDatabase::start().await.unwrap();
     let pool = database.pool.clone();

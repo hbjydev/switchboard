@@ -23,11 +23,170 @@ authoritative business state, while attempt rows explain individual executions.
   operations, migrations, and SQLx persistence.
 - `crates/runtime`: agent definition, Worker, AgentBackend request/result contract,
   Pi RPC adapter, ExecutionEnvironment transport, and deterministic fake executor.
-- `src/main.rs`: Clap CLI, configuration, and wiring.
+- `crates/control-plane`: small application layer, versioned HTTP API, stable
+  DTOs, authentication, and persistent scheduler lifecycle.
+- `src/main.rs`: Clap CLI, configuration, remote API client, and server wiring.
 - `migrations`: clean PostgreSQL schema for this application.
 
 There is deliberately no Swarm object. Multiple workers coordinate by claiming
 ordinary Ledger work. A scheduling hierarchy is unnecessary for this milestone.
+
+## Persistent control plane and deployment
+
+`switchboard serve` is the persistent control plane. It owns the Ledger handle,
+HTTP API, recovery, scheduling, and execution control. PostgreSQL remains the
+durable source of truth. The persistent scheduler is orchestration; AgentBackend
+is execution. HTTP types and transport errors stay outside Ledger domain code.
+A small application layer shares issue operations between HTTP handlers and the
+transitional direct CLI instead of duplicating lifecycle rules.
+External clients interact with the Ledger through the Switchboard control plane
+API, not by accessing PostgreSQL directly.
+
+The initial production topology is:
+
+```text
+clients (CLI, future UI/integrations)
+               |
+       Switchboard Deployment (1 replica initially)
+       + HTTP API
+       + scheduler / recovery
+       + execution controller ----> AgentBackend / local execution
+               |
+           PostgreSQL
+
+Later: execution controller -> KubernetesEnvironment -> gVisor agent Pods
+```
+
+Future execution isolation does not move durable orchestration into Pi or pods.
+KubernetesEnvironment and gVisor execution are not implemented. Actual Phoebe
+configuration belongs in `hbjydev/phoebe`, not this repository.
+
+Deployment order is `switchboard migrate`, OIDC issuer/client/resource
+configuration, then `switchboard serve`. Serve never applies migrations; startup
+validates database/schema and required identity-provider configuration before
+serving. Authentication is required for API-only and local servers too. PostgreSQL needs persistent storage, backup, and
+ordinary database operations. Container restarts must reuse that database. The
+existing non-root image accepts `serve` through its entrypoint and requires no
+extra packages for the API or fake backend. Pi local execution still needs an
+operator-provided Pi installation, credentials, and workspace; secrets are runtime
+configuration and must not be baked into an image.
+
+The server listens on `0.0.0.0:8080` by default. `DATABASE_URL` is required only by
+serve, migrations, and direct database/debugging commands. Configure listen address,
+lease duration, scheduler interval/concurrency, backend, and agent profile through
+CLI/environment settings documented in the README. `--scheduler=false` runs just
+the API and does not require Pi configuration. One configured Agent Peer serves
+all scheduler slots in this milestone; capability matching is deferred.
+
+A bounded set of Tokio worker tasks uses the existing Worker loop. Each slot
+recovers expired attempts, atomically claims eligible work, runs an independent
+attempt with its own heartbeat and cancellation lifecycle, then applies the fenced
+result. Successful work is followed by another tick immediately; idle/error ticks
+wait for the configured modest polling interval (default one second). There is
+no in-memory durable queue. Claims and fencing protect against duplicate ownership
+across slots or server processes. Start with one replica; concurrent Ledger claims
+are safe, but full server HA lifecycle behavior is not claimed.
+
+Ctrl-C and SIGTERM stop HTTP acceptance and new claims, cancel active executions,
+and allow bounded backend cleanup. Heartbeat renewal stops when cancellation
+takes effect. Shutdown cancellation is
+never a successful completion: unfinished attempts retain their leases and become
+recoverable after expiry. Restarted servers run the same recovery path, preserve
+attempt history, and create a fresh AttemptId when reclaiming. This mechanism also
+handles abrupt process crashes; it cannot undo external effects.
+
+## HTTP contract and operator boundary
+
+The JSON API uses UUID identities and explicit boundary DTOs under `/api/v1`:
+
+| Method | Route | Operation |
+| --- | --- | --- |
+| POST / GET | `/api/v1/issues` | Create / list Issues. |
+| GET | `/api/v1/issues/:id` | Inspect an Issue. |
+| GET | `/api/v1/issues/:id/events` | Inspect durable lifecycle history. |
+| GET | `/api/v1/issues/:id/attempts` | Inspect execution attempts. |
+| POST | `/api/v1/issues/:id/ready` | Make eligible backlog work available. |
+| POST | `/api/v1/issues/:id/complete` | Human completion under lifecycle rules. |
+| POST | `/api/v1/issues/:id/cancel` | Cancel with a reason. |
+| POST | `/api/v1/issues/:id/answer` | Resolve a Question or Approval. |
+| POST | `/api/v1/issues/:id/dependencies` | Add a prerequisite. |
+| GET | `/api/v1/status` | Safe version, scheduler, and backend configuration. |
+| GET | `/api/v1/me` | Verified identity and its durable Peer ID. |
+
+This API exposes controlled use cases rather than database CRUD or arbitrary
+status changes. Domain conflicts and invalid transitions return structured client
+errors; unknown Issues return 404. Responses use
+`{"error":{"code":"issue_not_found","message":"..."}}` for errors and do not
+include SQL, connection information, credentials, or internal error chains.
+
+`GET /healthz` reports process liveness. `GET /readyz` checks database/schema
+availability and bounded issuer/JWKS availability needed to serve requests.
+Fresh cached signing keys permit continued operation during a provider outage;
+readiness fails when required dependencies are unavailable. Neither endpoint mutates state or runs migrations. Both are
+unauthenticated for later Kubernetes probes. Request tracing includes method,
+route, status, latency, and request ID; request bodies are not logged. Execution
+tracing retains AttemptId. Status exposes no provider credentials or raw settings.
+
+Every `/api/v1` endpoint requires `Authorization: Bearer <access-token>`.
+Switchboard is a provider-neutral OIDC/OAuth2 resource server and does not issue
+its own tokens. JWT signature validation uses discovered issuer JWKS; validation
+also checks issuer, API resource audience, expiry, and not-before claims. Discovery
+and key requests are bounded and keys are cached. Normal issuer endpoints require
+HTTPS. `SWITCHBOARD_OIDC_ALLOW_LOOPBACK_HTTP` explicitly permits literal loopback
+HTTP for fixtures/development, while retaining discovery and all token checks.
+There is no anonymous or shared-static-token API mode. Missing/invalid credentials
+return 401 and insufficient authority returns 403. Probes are the only anonymous
+HTTP routes. Tokens, secrets, request bodies, and raw claims are never logged.
+Opaque-token introspection is not implemented.
+
+The server requires `SWITCHBOARD_OIDC_ISSUER` and
+`SWITCHBOARD_OIDC_USER_AUDIENCE`. Optional
+`SWITCHBOARD_OIDC_WORKLOAD_AUDIENCE` enables OAuth2 workloads. These are distinct
+resource audiences, not the public CLI client ID. One configured issuer serves
+both identities; it must restrict user-audience grants to human login and
+workload-audience grants to client credentials. Audience separation alone does
+not prove the original grant type: these restrictions are an explicit identity
+provider configuration contract. Switchboard does not configure the provider.
+
+`switchboard:read` permits API GET requests. Human mutations require a user token
+with `switchboard:write`; current workload tokens can only read with
+`switchboard:read`. Attempt-specific scopes and execution callbacks are not
+implemented. Migration 0003 maps verified `(issuer, subject)` to a durable Peer;
+mutation attribution uses that mapping rather than caller-supplied actor names.
+HTTP DTOs reject `actor` fields. `/api/v1/me` exposes safe verified identity and
+Peer ID, never credentials. Fine-grained ownership/RBAC remains outside scope.
+
+The public CLI uses authorization code flow with PKCE S256. `auth login` opens a
+browser and receives a loopback callback on `127.0.0.1:8400/callback` by default;
+`--redirect-port` selects another port. Callback state and ID-token nonce are
+validated, and only the issued access token is sent to the API. The CLI client
+uses `SWITCHBOARD_OIDC_CLIENT_ID`, defaults to scopes
+`openid profile offline_access switchboard:read switchboard:write`, and supports
+`--resource` for RFC 8707 audience selection. `auth client-credentials` obtains
+workload access tokens with runtime-only `SWITCHBOARD_OAUTH_CLIENT_ID` and
+`SWITCHBOARD_OAUTH_CLIENT_SECRET`, defaulting to `switchboard:read`.
+
+Credentials use a private JSON cache at
+`$XDG_STATE_HOME/switchboard/credentials.json` (falling back to
+`~/.local/state/switchboard/credentials.json`), overrideable with
+`SWITCHBOARD_CREDENTIALS_FILE`. On Unix its mode is 0600. Cached user sessions refresh
+automatically; `auth logout` only removes the local cache. Client secrets are not
+persisted; expired workload tokens must be reissued using runtime credentials.
+`SWITCHBOARD_ACCESS_TOKEN` supplies an already issued access token and
+overrides the cache. Tests use a scripted local issuer without external provider
+accounts or real models.
+
+Issue CLI commands use the HTTP API when `SWITCHBOARD_URL` (or the corresponding
+CLI option) is set and require no `DATABASE_URL`. Legacy direct database mode is
+retained temporarily for compatibility; migrate and worker debugging commands
+remain operator tools with direct database access. Future integrations must use
+the control plane API.
+
+A global SSE event stream is deferred. A durable, resumable cursor must respect
+transaction ordering and bounded polling; adding a misleading best-effort cursor
+would expand this milestone. Per-Issue event inspection is available now. A future
+stream will expose high-level Ledger changes, never model tokens or reasoning,
+and correctness will remain independent of whether any client consumes it.
 
 ## States
 
@@ -63,8 +222,9 @@ exclusive transaction-scoped PostgreSQL advisory lock. Claim transactions acquir
 the corresponding shared lock, allowing claims to overlap while preventing races
 with dependency changes. This coarse lock makes cycle checks and automatic
 unblocking straightforward and correct. It is a deliberate throughput tradeoff,
-not a distributed scheduling framework. All mutations must go through the Ledger
-API to preserve these invariants.
+not a distributed scheduling framework. All mutations must go through controlled
+Ledger operations to preserve these invariants. External clients interact with the Ledger
+through the Switchboard control plane API, not by accessing PostgreSQL directly.
 
 ## Dependencies and hierarchy
 
@@ -82,8 +242,8 @@ with an explicit blocking dependency so an executor can safely hand off sub-work
 ## Human input
 
 Questions and Approvals are ordinary issues awaiting resolution by a human peer.
-They form an unassigned shared inbox in this milestone; any trusted human can
-resolve them. A worker can create one and depend on it. The CLI records a nonempty human answer, completes
+They form an unassigned shared inbox in this milestone; an authenticated human
+with `switchboard:write` can resolve them. A worker can create one and depend on it. The CLI records a nonempty human answer, completes
 the human issue, and unblocks dependent work when all dependencies are satisfied.
 Approvals currently carry decision text; there is no enforced approve/reject
 policy. Applications requiring authorization semantics must add that policy
@@ -118,8 +278,8 @@ create_child_for_attempt take AttemptId rather than PeerId. Each transaction loc
 in this order: advisory lock, Issue row, attempt row. It validates the Issue's
 current attempt, owner, active states, and unexpired lease using database time
 before writing. A known Peer returning with an old attempt cannot renew or mutate
-the Issue, including before recovery. IDs assume trusted callers and are not
-authentication credentials. Human administration uses human-only operations without
+the Issue, including before recovery. IDs are not authentication credentials. The HTTP boundary authenticates the
+caller before invoking domain operations. Human administration uses human-only operations without
 requiring an attempt; the agent Peer-only mutation path cannot bypass fencing. Root work intake through
 create_issue is human-only; execution-generated Tasks, Questions, and Approvals
 use the fenced child/handoff operation.
@@ -140,8 +300,10 @@ then applies an outcome. ExecutionRequest includes AttemptId, Peer, instructions
 Issue, parent, persisted children, prerequisites, and workspace. AgentBackend is
 independent of model providers; the legacy Executor adapter preserves the fake demo. An inline Tokio select renews at one
 third of the lease duration while context loading and execute() are pending. The
-first renewal is delayed, missed ticks use Delay, and renewal wins simultaneous
-readiness. No detached heartbeat task exists: dropping the tick or a failed renewal
+first renewal is delayed and missed ticks use Delay. Cancellation takes priority
+over heartbeat and result readiness; while active, renewal wins simultaneous
+result readiness. Cancellation also interrupts database waits during recovery,
+claiming, startup, and renewal. No detached heartbeat task exists: dropping the tick or a failed renewal
 cancels execution and stops the timer. Renewal failure propagates; ExecutionLost
 clearly identifies lost authority. Cancellation gets up to five seconds of cooperative
 backend cleanup before the future is dropped. Applying an outcome still checks
@@ -157,7 +319,8 @@ transaction. Claims/heartbeats take shared advisory locks; recovery never upgrad
 a shared lock, so claims, renewals, and recovery cannot race their authority changes.
 Recovery and claim are separate transactions: any worker may win the new claim.
 The partial unique index remains a database backstop. worker recover exposes
-maintenance without execution; normal polling workers also perform recovery.
+maintenance without execution; normal polling workers and persistent scheduler
+slots also perform recovery.
 
 The deterministic executor's child/question lifecycle persists through worker
 restarts. Claims and recoveries require no LLM, provider account, conversation
