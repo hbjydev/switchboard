@@ -24,7 +24,11 @@ impl Fixture {
 
     pub fn config(&self) -> PiConfig {
         let mut config = PiConfig::local(self.workspace.clone());
-        config.binary = env!("CARGO_BIN_EXE_scripted-pi").into();
+        // Nextest remaps executable paths when an archive moves between runners.
+        // The compile-time Cargo path remains a fallback for direct Cargo runs.
+        config.binary = std::env::var_os("NEXTEST_BIN_EXE_scripted_pi")
+            .or_else(|| std::env::var_os("CARGO_BIN_EXE_scripted-pi"))
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_scripted-pi").into());
         config.shutdown_grace = Duration::from_millis(100);
         config.execution_timeout = Duration::from_secs(10);
         config
