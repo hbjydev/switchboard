@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">Switchboard</title>
+  <desc id="desc">Six ring terminals linked by three interwoven routes, transitioning from pink and violet to cyan.</desc>
+  <defs>
+    <linearGradient id="routing" x1="103" y1="158" x2="404" y2="280" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F16AE8"/>
+      <stop offset=".34" stop-color="#B16CFA"/>
+      <stop offset=".65" stop-color="#788FFF"/>
+      <stop offset="1" stop-color="#62DBF5"/>
+    </linearGradient>
+    <linearGradient id="underpass-shade" x1="190" y1="0" x2="314" y2="0" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#242044" stop-opacity="0"/>
+      <stop offset=".5" stop-color="#242044" stop-opacity=".32"/>
+      <stop offset="1" stop-color="#242044" stop-opacity="0"/>
+    </linearGradient>
+    <mask id="weave" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      <path fill="white" d="M0 0H512V512H0z"/>
+      <g stroke="black" stroke-width="33" stroke-linecap="round">
+        <path d="M 164,151 H 208 C 234,151 256,173 256,199 V 207 C 256,233 278,255 304,255 H 348"/><path d="M 164,255 H 208 C 234,255 256,277 256,303 V 311 C 256,337 278,359 304,359 H 348"/>
+      </g>
+    </mask>
+    <filter id="glow" x="-25%" y="-25%" width="150%" height="150%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="9"/>
+    </filter>
+  </defs>
+  
+  
+  <g stroke-linecap="butt" stroke-linejoin="round">
+    <path d="M 164,359 H 200 C 231,359 256,334 256,303 V 207 C 256,176 281,151 312,151 H 348" stroke="url(#routing)" stroke-width="25" mask="url(#weave)"/>
+    <path d="M 164,359 H 200 C 231,359 256,334 256,303 V 207 C 256,176 281,151 312,151 H 348" stroke="url(#underpass-shade)" stroke-width="25" mask="url(#weave)"/>
+    <g stroke="url(#routing)" stroke-width="25">
+      <path d="M 164,151 H 208 C 234,151 256,173 256,199 V 207 C 256,233 278,255 304,255 H 348"/><path d="M 164,255 H 208 C 234,255 256,277 256,303 V 311 C 256,337 278,359 304,359 H 348"/>
+    </g>
+    <g stroke="url(#routing)" stroke-width="19"><circle cx="136" cy="151" r="27"/>
+<circle cx="136" cy="255" r="27"/>
+<circle cx="136" cy="359" r="27"/>
+<circle cx="376" cy="151" r="27"/>
+<circle cx="376" cy="255" r="27"/>
+<circle cx="376" cy="359" r="27"/></g>
+  </g>
+</svg>
