@@ -22,6 +22,7 @@ macro_rules! id_type {
 }
 id_type!(IssueId);
 id_type!(PeerId);
+id_type!(AttemptId);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "peer_kind")]
@@ -70,6 +71,7 @@ pub struct Issue {
     pub status: IssueStatus,
     pub created_by: PeerId,
     pub owner: Option<PeerId>,
+    pub current_attempt_id: Option<AttemptId>,
     pub parent_id: Option<IssueId>,
     pub priority: i32,
     pub created_at: DateTime<Utc>,
@@ -102,6 +104,37 @@ pub struct IssueEvent {
     pub actor: Option<PeerId>,
     pub occurred_at: DateTime<Utc>,
     pub metadata: serde_json::Value,
+}
+
+/// An execution identity is a fencing token, independent of durable peer identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "attempt_state")]
+pub enum AttemptState {
+    Claimed,
+    Running,
+    Completed,
+    Failed,
+    Expired,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ExecutionAttempt {
+    pub id: AttemptId,
+    pub issue_id: IssueId,
+    pub peer_id: PeerId,
+    pub state: AttemptState,
+    pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub heartbeat_at: DateTime<Utc>,
+    pub lease_expires_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Claim {
+    pub issue: Issue,
+    pub attempt: ExecutionAttempt,
 }
 
 #[cfg(test)]

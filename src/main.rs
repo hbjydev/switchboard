@@ -12,6 +12,15 @@ struct Cli {
     database_url: String,
     #[arg(long, default_value = "operator")]
     human: String,
+    /// Execution lease length; workers renew active attempts automatically.
+    #[arg(
+        long,
+        global = true,
+        env = "SWITCHBOARD_LEASE_SECONDS",
+        default_value_t = 30,
+        value_parser = clap::value_parser!(u64).range(1..=86_400)
+    )]
+    lease_seconds: u64,
     #[command(subcommand)]
     command: Command,
 }
@@ -74,6 +83,9 @@ enum IssueCommand {
     Events {
         id: IssueId,
     },
+    Attempts {
+        id: IssueId,
+    },
     Answer {
         id: IssueId,
         #[arg(long)]
@@ -98,6 +110,8 @@ enum IssueCommand {
 
 #[derive(Subcommand)]
 enum WorkerCommand {
+    /// Recover expired execution attempts and reconsider their issues.
+    Recover,
     Run {
         #[arg(long, default_value = "worker")]
         agent: String,
@@ -110,13 +124,22 @@ enum WorkerCommand {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let ledger = Ledger::connect(&cli.database_url).await?;
+    let ledger = Ledger::connect(&cli.database_url)
+        .await?
+        .with_lease_duration(Duration::from_secs(cli.lease_seconds))?;
     match cli.command {
         Command::Migrate => {
             ledger.migrate().await?;
             println!("Ledger migrations applied");
         }
         Command::Issue { command } => issue_command(&ledger, &cli.human, command).await?,
+        Command::Worker {
+            command: WorkerCommand::Recover,
+        } => {
+            for id in ledger.recover_expired_attempts().await? {
+                println!("Recovered {id}");
+            }
+        }
         Command::Worker {
             command: WorkerCommand::Run { agent, until_idle },
         } => {
@@ -192,6 +215,7 @@ async fn issue_command(ledger: &Ledger, human_name: &str, command: IssueCommand)
             "{}",
             serde_json::to_string_pretty(&ledger.events(id).await?)?
         ),
+        IssueCommand::Attempts { id } => print_attempts(ledger, id).await?,
         IssueCommand::Answer { id, answer } => {
             ledger.resolve_human_issue(id, human.id, &answer).await?;
             println!("Answered {id}");
@@ -213,5 +237,20 @@ async fn issue_command(ledger: &Ledger, human_name: &str, command: IssueCommand)
             println!("{id} depends on {dependency}");
         }
     }
+    Ok(())
+}
+
+async fn print_attempts(ledger: &Ledger, id: IssueId) -> Result<()> {
+    let issue = ledger.get_issue(id).await?;
+    let mut records = Vec::new();
+    for attempt in ledger.attempts(id).await? {
+        let peer = ledger.peer(attempt.peer_id).await?;
+        records.push(serde_json::json!({
+            "current": issue.current_attempt_id == Some(attempt.id),
+            "peer": peer,
+            "attempt": attempt,
+        }));
+    }
+    println!("{}", serde_json::to_string_pretty(&records)?);
     Ok(())
 }
