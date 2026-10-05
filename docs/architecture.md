@@ -9,8 +9,9 @@ The current-state tables are authoritative; events explain changes without
 requiring event replay or introducing full event sourcing.
 
 A Peer is a durable human or agent identity. It has no model or provider. The
-runtime's Agent and Executor describe who performs work and how execution runs;
-future provider adapters belong behind the executor boundary, outside the domain.
+runtime's Agent and AgentBackend describe who performs work and how an autonomous
+execution runs. Model/provider selection belongs to a backend's harness, outside
+the domain and durable Peer identity.
 An ExecutionAttempt is one claim of one Issue by a Peer. A Peer may execute the
 same Issue repeatedly; every claim gets a new AttemptId. The Issue remains the
 authoritative business state, while attempt rows explain individual executions.
@@ -20,8 +21,8 @@ authoritative business state, while attempt rows explain individual executions.
 
 - `crates/ledger`: typed UUID identities, domain types, controlled lifecycle
   operations, migrations, and SQLx persistence.
-- `crates/runtime`: agent definition, worker loop, provider-independent execution
-  outcomes, and deterministic fake executor.
+- `crates/runtime`: agent definition, Worker, AgentBackend request/result contract,
+  Pi RPC adapter, ExecutionEnvironment transport, and deterministic fake executor.
 - `src/main.rs`: Clap CLI, configuration, and wiring.
 - `migrations`: clean PostgreSQL schema for this application.
 
@@ -135,15 +136,18 @@ update heartbeat_at and lease_expires_at on the attempt only, avoiding event noi
 ## Worker heartbeats and recovery
 
 The worker recovers expired work, claims, starts, loads durable context, executes,
-then applies an outcome. ExecutionContext includes attempt_id and persisted children;
-the Executor remains provider-independent. An inline Tokio select renews at one
+then applies an outcome. ExecutionRequest includes AttemptId, Peer, instructions,
+Issue, parent, persisted children, prerequisites, and workspace. AgentBackend is
+independent of model providers; the legacy Executor adapter preserves the fake demo. An inline Tokio select renews at one
 third of the lease duration while context loading and execute() are pending. The
 first renewal is delayed, missed ticks use Delay, and renewal wins simultaneous
 readiness. No detached heartbeat task exists: dropping the tick or a failed renewal
-drops the execution future and timer. Renewal failure propagates; ExecutionLost
-clearly identifies lost authority. Applying an outcome still checks authority, even
-if no heartbeat observed the loss. Providers must later respect cancellation; dropping
-a future cannot undo effects or stop tasks detached by a provider.
+cancels execution and stops the timer. Renewal failure propagates; ExecutionLost
+clearly identifies lost authority. Cancellation gets up to five seconds of cooperative
+backend cleanup before the future is dropped. Applying an outcome still checks
+authority, even if no heartbeat observed the loss. Process handles signal their
+supervisor on drop, so cleanup continues while the Tokio runtime is alive. Cancellation
+cannot undo external effects already performed.
 
 recover_expired_attempts is explicit and called before each worker claim. It takes
 the existing exclusive graph/lifecycle lock, locks expired Claimed/Running Issues,
@@ -160,11 +164,81 @@ restarts. Claims and recoveries require no LLM, provider account, conversation
 session, or external tool. The coarse locking strategy prioritizes correctness and
 may delay renewals under heavy write contention; lease duration should leave headroom.
 
+## Autonomous execution backends
+
+**Switchboard owns durable coordination; agent backends own ephemeral agent execution.**
+
+AgentBackend means “run this execution attempt with an autonomous agent harness,”
+not “call a model provider.” Worker owns scheduling, leases, heartbeats, human
+attention, and fenced outcome application. Backend requests contain value snapshots
+and no Ledger/database handles. Backend results distinguish a textual completion,
+explicit task failure, cancellation, and BackendError (transport/protocol failure).
+Worker applies backend errors as fenced failures. Cancelled output is never applied.
+The demo compatibility adapter retains existing fake child/human handoffs without
+exposing those capabilities to Pi. Future backends can include OpenCode, native
+models, and humans without changing Peer identity.
+
+PiBackend starts one fresh process per attempt, including every retry/reclaim,
+with `--mode rpc --no-session`. It sends a correlated JSONL `prompt` command and
+continuously consumes stdout responses/events. Prompt acceptance and `agent_end`
+are not completion; `agent_settled` is the current Pi session-level completion
+boundary after retries, compaction, and queued activity. Events may precede the
+acknowledgement; both acceptance and settlement are required. A `handled` prompt
+without a run is rejected clearly. Unsupported interactive extension requests also
+fail clearly. Older Pi versions without `agent_settled` time out rather than being
+mistaken for successful execution.
+
+Only text blocks from the last authoritative assistant `message_end` become the
+final summary. Thinking, tools, streaming deltas, and raw conversations are neither
+logged nor stored. Temporary error messages can be superseded by a successful Pi
+retry. A settled error, exhausted retries, or output-limit stop is a failure;
+`SWITCHBOARD_FAILED:` at the start of final text is the explicit task-failure convention.
+Missing final text is a protocol error. Prompts are bounded to 32 KiB and summaries
+to 8 KiB on UTF-8 boundaries. Each wire record is limited to 8 MiB before parsing.
+A successful summary is added to IssueCompleted metadata in the existing fenced
+completion transaction. No migration or authoritative Pi session storage is needed.
+
+## Execution environment and process ownership
+
+ExecutionEnvironment asynchronously creates an RpcProcess from a ProcessSpec: executable,
+arguments, working directory, shutdown grace, and adapter-supplied abort record.
+The transport exposes send, next_record, and finish; it does not interpret Pi RPC.
+LocalProcessEnvironment validates cwd and uses Tokio process primitives. A
+supervisor owns the child and stdin, a bounded reader consumes stdout, and stderr
+is drained separately without parsing or logging its possibly sensitive contents.
+PiBackend only knows the transport contract, so process execution can later move
+to another environment without spreading Command usage through Worker.
+
+Settlement closes stdin for orderly shutdown and awaits child exit before returning
+an outcome. Cancellation requests abort, closes input, waits briefly, then kills
+and reaps the direct child if needed. Writes and graceful waits have bounded
+deadlines (two seconds by default); execution has a configurable deadline (one
+hour by default). Dropping the handle triggers supervisor cancellation. Tokio
+kill_on_drop and a synchronous Unix process-group guard are last resorts during
+runtime teardown. Unix cleanup kills remaining group members too; processes that
+escape the group are outside this local mechanism. Non-Unix cleanup only covers
+the direct child. There are no detached heartbeat tasks.
+
+Local cwd/resource discovery and Pi credentials use Pi's ordinary runtime behavior.
+No workspace provisioning, credentials cloning, shell policy, or isolation is added.
+Provider/model arguments are infrastructure choices; they never alter Peer identity.
+CLI Ctrl-C waits for cancellation/cleanup, leaving interrupted work available for
+normal lease recovery. Fencing stops stale Ledger updates, not already-performed
+filesystem effects.
+
+A future KubernetesEnvironment should own pod/container creation, streaming I/O,
+termination, and isolated workspace provisioning. Kubernetes with gVisor/Agent
+Sandbox is intended future work and is not implemented. The current ProcessSpec
+and PathBuf workspace express local assumptions; remote execution will need
+workspace/environment descriptors and a nonlocal exit/cleanup implementation.
+Pi sessions will remain ephemeral there as well. Container/pod deletion should
+replace Unix group cleanup and cover all descendants, including detached tools.
+
 ## Idempotency boundary
 
 Side effects on behalf of an attempt should use `(attempt_id, operation identity)`
-as their durable idempotency scope. The stable attempt ID is available to Executor
-implementations now. A reclaimed execution has a different scope; avoiding duplicate
+as their durable idempotency scope. The stable attempt ID is available to AgentBackend
+implementations. A reclaimed execution has a different scope; avoiding duplicate
 external effects across attempts additionally requires durable business-operation
 identity/checkpoints or reconciliation. Ledger fencing prevents stale database
 outcomes, not external effects already in flight. No external tool or generic
@@ -176,7 +250,8 @@ idempotency subsystem is introduced here.
 2. Retry budgets/backoff for repeated crashes and explicit failed work.
 3. Richer human decisions, rejection, reassignment, and failed dependency handling.
 4. Agent capability selection and fairness without coupling identity to providers.
-5. Provider adapters and execution tools behind the Executor boundary.
+5. Ledger delegation/human tools behind fenced backend operations, followed by
+   isolated Kubernetes/gVisor execution environments.
 6. Finer-grained graph concurrency if measured contention warrants it.
 
 The migrations replace the old Switchboard schema. They are a clean start and do
