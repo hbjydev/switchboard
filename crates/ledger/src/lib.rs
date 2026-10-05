@@ -117,6 +117,13 @@ impl Ledger {
                 .await?,
         )
     }
+    /// Direct prerequisites, including completed prerequisites.
+    pub async fn dependencies(&self, id: IssueId) -> Result<Vec<Issue>> {
+        self.get_issue(id).await?;
+        Ok(sqlx::query_as("SELECT i.* FROM issues i JOIN issue_dependencies d ON d.dependency_id=i.id WHERE d.issue_id=$1 ORDER BY i.id")
+            .bind(id).fetch_all(&self.pool).await?)
+    }
+
     pub async fn events(&self, id: IssueId) -> Result<Vec<IssueEvent>> {
         self.get_issue(id).await?;
         Ok(

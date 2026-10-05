@@ -6,9 +6,26 @@ license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+rpc-fixture = []
+
+[[bin]]
+name = "scripted-pi"
+path = "tests/fixtures/scripted_pi.rs"
+required-features = ["rpc-fixture"]
+test = false
+bench = false
+
 [dependencies]
 ledger.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["process"] }
 
 [dev-dependencies]
 testcontainers-modules.workspace = true

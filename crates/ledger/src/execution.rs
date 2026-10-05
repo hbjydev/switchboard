@@ -126,6 +126,22 @@ impl Ledger {
             .await
     }
 
+    /// Store the bounded agent result in the same fenced transaction as completion.
+    pub async fn complete_attempt_with_summary(
+        &self,
+        id: AttemptId,
+        summary: &str,
+    ) -> Result<Issue> {
+        nonempty(summary, "completion summary")?;
+        self.finish_execution(
+            id,
+            IssueStatus::Completed,
+            "IssueCompleted",
+            json!({"summary":summary}),
+        )
+        .await
+    }
+
     pub async fn fail_attempt(&self, id: AttemptId, reason: &str) -> Result<Issue> {
         nonempty(reason, "failure reason")?;
         self.finish_execution(

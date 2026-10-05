@@ -2,9 +2,9 @@
 
 Switchboard is a small, provider-independent autonomous worker runtime built
 around a shared work **Ledger**. It uses Rust, Tokio, PostgreSQL, and SQLx. Its
-first vertical slice creates work, claims it safely, creates sub-work, waits for
-human input, and resumes to completion using a deterministic executor. No LLM
-provider, API key, or model installation is required.
+workers claim work safely and execute it through an AgentBackend. The local Pi
+backend runs Pi's normal coding-agent loop over RPC; the deterministic fake backend
+retains the child-work and human-question demo without requiring a model provider.
 
 Every actionable item is an Issue, including Tasks, Questions, and Approvals.
 Issues carry state, identity, hierarchy, dependencies, and structured lifecycle
@@ -80,6 +80,66 @@ To keep a worker polling instead, run `cargo run -- worker run`. It polls every
 with `worker run --agent another-worker`. The CLI's default human identity is
 `operator`, configurable with the global `--human` option.
 
+## Run a local Pi agent
+
+Install Pi separately and configure its provider credentials using Pi's normal
+configuration. Use a Pi version whose RPC protocol emits `agent_settled`; older
+versions that only emit `agent_end` are not supported. The implementation follows
+[Pi's current RPC documentation](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md).
+No model-provider SDK or vendor credential configuration is added to Switchboard.
+
+```bash
+cargo run -- issue create --title "Fix failing tests" --description "Run the tests and fix the failures"
+cargo run -- worker run --backend pi --workspace /absolute/path/to/repository --until-idle
+```
+
+Infrastructure options are separate from the durable `--agent` identity:
+
+| Option | Environment | Default |
+| --- | --- | --- |
+| `--backend fake\|pi` | — | `fake` |
+| `--workspace` | `SWITCHBOARD_WORKSPACE` | Required for Pi |
+| `--pi-binary` | `SWITCHBOARD_PI_BINARY` | `pi` |
+| `--pi-provider` | `SWITCHBOARD_PI_PROVIDER` | Pi's configuration |
+| `--pi-model` | `SWITCHBOARD_PI_MODEL` | Pi's configuration |
+| `--instructions` | `SWITCHBOARD_AGENT_INSTRUCTIONS` | Complete the assigned task and report its result. |
+| `--execution-timeout-seconds` | — | `3600` |
+
+The directory must exist. Each attempt starts a fresh
+`pi --mode rpc --no-session` subprocess in that directory; provider/model options
+are passed as arguments. Invalid configuration and missing executables fail clearly;
+Pi never falls back to the fake backend. A startup or protocol failure records a
+fenced Failed outcome, while configuration errors fail before a worker starts.
+
+Switchboard owns durable coordination; agent backends own ephemeral agent execution.
+The backend receives agent instructions, Issue identity/title/description, and
+parent, child, and prerequisite snapshots, without database handles. Pi manages
+models, tools, context, retries, and compaction. It receives a bounded prompt
+(32 KiB; at most 8 children and 8 prerequisites), and returns a final summary
+(up to 8 KiB, on UTF-8 boundaries). The completion summary is stored in
+`IssueCompleted` event metadata in the same fenced transaction as completion.
+A final summary starting with `SWITCHBOARD_FAILED:` reports explicit task failure.
+Pi execution errors also produce failure outcomes; aborted work has no completion.
+
+Prompt acceptance and `agent_end` are not completion: Switchboard drains events
+until `agent_settled`, including retries and compaction, then closes stdin and waits
+for process exit before applying the result. Pi session files are not durable
+Switchboard state. This milestone exposes no Ledger mutation, delegation, or
+human-question tools to Pi; those remain available in the deterministic demo only.
+
+Lease loss, a backend deadline, or Ctrl-C requests abort and closes input. The
+supervisor grants bounded shutdown time, then kills and reaps an uncooperative
+process. Dropping an execution future signals the same cleanup. On Unix, the
+process has its own group and remaining group members are killed during cleanup.
+On other platforms, cleanup covers the direct Pi child. Local execution is not an
+isolated sandbox and cannot undo file/shell effects already performed. Cancelled
+attempts stop renewing and can subsequently be recovered after lease expiry.
+
+Tracing records attempt IDs, process IDs, startup, acceptance, settlement, abort,
+exit, and backend failure. `RUST_LOG=runtime=info` selects runtime tracing. Stderr
+is drained as diagnostics without parsing or recording it; prompts, credentials,
+raw conversations, and thinking content are not logged.
+
 ## Inspect and manage work
 
 ```bash
@@ -129,7 +189,7 @@ Ready (or waiting if prerequisites require it). Reclaiming creates a new attempt
 even when the same Peer returns. Late completions, failures, and child/human
 handoffs from previous attempts are rejected.
 
-A heartbeat failure ends the tick with an error and drops the execution future;
+A heartbeat failure cancels the backend, allows bounded cleanup, and ends the tick with an error;
 no detached heartbeat task survives. Completing or handing off work closes the
 attempt transactionally. Repeating an outcome conflicts before adding events or
 children. Heartbeats update attempt rows without flooding Issue events.
@@ -138,7 +198,7 @@ children. Heartbeats update attempt rows without flooding Issue events.
 
 ```text
 crates/ledger/    Domain types, controlled operations, PostgreSQL persistence
-crates/runtime/   Agent, worker loop, executor contract, deterministic executor
+crates/runtime/   AgentBackend, worker loop, Pi RPC, local process transport, fake executor
 src/main.rs      CLI and wiring
 migrations/      PostgreSQL schema
 docs/architecture.md
@@ -167,14 +227,22 @@ includes concurrent claiming, dependency cycles and unblocking, human resolution
 attempt fencing, lease renewal and recovery races, long-running worker heartbeats,
 and event history.
 
+The `rpc-fixture` feature builds a scripted Rust child solely for deterministic
+RPC tests; all-feature checks enable it. These tests cover JSONL framing, interleaved
+events, settlement, retries, bounded results, protocol errors, unexpected exits,
+diagnostic isolation, abort, deadlines, forced termination, and future-drop cleanup.
+Pi/Worker integration tests also verify context, summary persistence, lease loss,
+and model changes using the same Peer. No test calls a real model provider.
+
 The repository retains pinned tooling, Nextest archives, formatting and Clippy
 policy, dependency auditing, Renovate, release automation, signed release assets,
 and a nonroot container build. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Current limits
 
-- The executor is deterministic. There are no provider integrations or software
-  editing tools.
+- Pi runs locally with its normal coding tools and provider configuration. Pi has
+  no Switchboard coordination tools yet. Kubernetes, gVisor, workspace cloning,
+  and native model-provider integrations are future work.
 - Lease recovery retries interrupted work, but explicit Failed work still needs
   human intervention. There is no retry budget or backoff for repeated crashes.
 - Dependency and lifecycle mutations use a coarse transaction advisory lock.
@@ -187,7 +255,7 @@ and a nonroot container build. See [CONTRIBUTING.md](CONTRIBUTING.md).
   general retry policy, or elaborate permissions are implemented.
 
 See [the architecture note](docs/architecture.md) for state semantics, transaction
-boundaries, and open design questions. Before adding a real executor, external effects need durable idempotency and
+boundaries, and open design questions. External effects still need durable idempotency and
 checkpointing: use `(attempt_id, operation identity)` for each effect within one
 attempt. This milestone fences Ledger writes; it cannot undo an external effect
 already performed by a worker that later loses its lease.

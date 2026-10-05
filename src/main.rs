@@ -1,9 +1,13 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use anyhow::Result;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use ledger::{IssueId, IssueKind, Ledger, NewIssue, PeerKind};
-use runtime::{Agent, FakeExecutor, Worker};
+use runtime::environment::LocalProcessEnvironment;
+use runtime::{
+    Agent, AgentBackend, BackendError, CancellationToken, ExecutionRequest, ExecutionResult,
+    FakeExecutor, PiBackend, PiConfig, Worker,
+};
 
 #[derive(Parser)]
 #[command(about = "A Ledger-driven autonomous worker runtime", version)]
@@ -112,18 +116,104 @@ enum IssueCommand {
 enum WorkerCommand {
     /// Recover expired execution attempts and reconsider their issues.
     Recover,
-    Run {
-        #[arg(long, default_value = "worker")]
-        agent: String,
-        /// Stop once no issue is runnable (human questions remain pending).
-        #[arg(long)]
-        until_idle: bool,
-    },
+    Run(WorkerOptions),
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum BackendKind {
+    Fake,
+    Pi,
+}
+
+#[derive(Args)]
+struct WorkerOptions {
+    #[arg(long, default_value = "worker")]
+    agent: String,
+    /// Stop once no issue is runnable (human questions remain pending).
+    #[arg(long)]
+    until_idle: bool,
+    #[arg(long, value_enum, default_value = "fake")]
+    backend: BackendKind,
+    /// Project directory for Pi resource discovery and coding tools.
+    #[arg(long, env = "SWITCHBOARD_WORKSPACE", required_if_eq("backend", "pi"))]
+    workspace: Option<PathBuf>,
+    #[arg(long, env = "SWITCHBOARD_PI_BINARY", default_value = "pi")]
+    pi_binary: String,
+    #[arg(long, env = "SWITCHBOARD_PI_PROVIDER")]
+    pi_provider: Option<String>,
+    #[arg(long, env = "SWITCHBOARD_PI_MODEL")]
+    pi_model: Option<String>,
+    #[arg(
+        long,
+        env = "SWITCHBOARD_AGENT_INSTRUCTIONS",
+        default_value = "Complete the assigned task and report its result."
+    )]
+    instructions: String,
+    #[arg(long, default_value_t = 3600, value_parser = clap::value_parser!(u64).range(1..))]
+    execution_timeout_seconds: u64,
+}
+
+enum SelectedBackend {
+    Fake(FakeExecutor),
+    Pi(PiBackend),
+}
+impl AgentBackend for SelectedBackend {
+    async fn execute(
+        &self,
+        request: ExecutionRequest,
+        cancellation: CancellationToken,
+    ) -> Result<ExecutionResult, BackendError> {
+        match self {
+            Self::Fake(backend) => AgentBackend::execute(backend, request, cancellation).await,
+            Self::Pi(backend) => backend.execute(request, cancellation).await,
+        }
+    }
+}
+
+fn selected_backend(options: &WorkerOptions) -> Result<SelectedBackend> {
+    match options.backend {
+        BackendKind::Fake => Ok(SelectedBackend::Fake(FakeExecutor)),
+        BackendKind::Pi => {
+            let workspace = options
+                .workspace
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--backend pi requires --workspace"))?;
+            anyhow::ensure!(
+                workspace.is_dir(),
+                "Pi workspace must be an existing directory"
+            );
+            let mut config = PiConfig::local(workspace);
+            config.binary = (&options.pi_binary).into();
+            config.provider.clone_from(&options.pi_provider);
+            config.model.clone_from(&options.pi_model);
+            config.execution_timeout = Duration::from_secs(options.execution_timeout_seconds);
+            Ok(SelectedBackend::Pi(PiBackend::new(
+                config,
+                LocalProcessEnvironment,
+            )?))
+        }
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "runtime=info".into()),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+    // Validate infrastructure configuration before opening the database.
+    let backend = if let Command::Worker {
+        command: WorkerCommand::Run(options),
+    } = &cli.command
+    {
+        Some(selected_backend(options)?)
+    } else {
+        None
+    };
     let ledger = Ledger::connect(&cli.database_url)
         .await?
         .with_lease_duration(Duration::from_secs(cli.lease_seconds))?;
@@ -141,29 +231,47 @@ async fn main() -> Result<()> {
             }
         }
         Command::Worker {
-            command: WorkerCommand::Run { agent, until_idle },
+            command: WorkerCommand::Run(options),
         } => {
-            let peer = ledger.ensure_peer(&agent, PeerKind::Agent).await?;
-            let worker = Worker::new(ledger, Agent { peer_id: peer.id }, FakeExecutor);
-            let shutdown = tokio::signal::ctrl_c();
-            tokio::pin!(shutdown);
-            loop {
-                tokio::select! {
-                    biased;
-                    signal = &mut shutdown => { signal?; break; }
-                    () = std::future::ready(()) => {}
-                }
-                // Finish the current transaction/outcome before honoring shutdown.
-                // Canceling tick mid-flight could otherwise strand a claimed issue.
-                match worker.tick().await? {
-                    Some(issue) => println!("{} {:?}: {}", issue.id, issue.status, issue.title),
-                    None if until_idle => break,
-                    None => tokio::select! {
-                        signal = &mut shutdown => { signal?; break; }
-                        () = tokio::time::sleep(Duration::from_millis(500)) => {}
-                    },
-                }
+            let backend =
+                backend.ok_or_else(|| anyhow::anyhow!("worker backend was not configured"))?;
+            run_worker(ledger, options, backend).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn run_worker(
+    ledger: Ledger,
+    options: WorkerOptions,
+    backend: SelectedBackend,
+) -> Result<()> {
+    let peer = ledger.ensure_peer(&options.agent, PeerKind::Agent).await?;
+    let worker = Worker::new(ledger, Agent { peer_id: peer.id }, backend)
+        .with_execution_settings(options.instructions, options.workspace);
+    let shutdown = tokio::signal::ctrl_c();
+    tokio::pin!(shutdown);
+    loop {
+        let cancellation = CancellationToken::new();
+        let tick = worker.tick_with_cancellation(cancellation.clone());
+        tokio::pin!(tick);
+        let result = tokio::select! {
+            biased;
+            signal = &mut shutdown => {
+                signal?;
+                cancellation.cancel();
+                let _ = tick.await; // Wait for abort/cleanup; do not apply cancelled output.
+                break;
             }
+            result = &mut tick => result?,
+        };
+        match result {
+            Some(issue) => println!("{} {:?}: {}", issue.id, issue.status, issue.title),
+            None if options.until_idle => break,
+            None => tokio::select! {
+                signal = &mut shutdown => { signal?; break; }
+                () = tokio::time::sleep(Duration::from_millis(500)) => {}
+            },
         }
     }
     Ok(())
