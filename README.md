@@ -113,7 +113,7 @@ docs/architecture.md
 
 ## Development and verification
 
-With `DATABASE_URL` pointing at the disposable server above:
+With Docker running (no `DATABASE_URL` or manually started PostgreSQL required):
 
 ```bash
 cargo fmt --all
@@ -123,12 +123,15 @@ mise run check
 mise run complexity-check
 ```
 
-SQLx integration tests create isolated databases and require a PostgreSQL role
-with permission to create databases. Do not run tests against personal, shared,
-or production resources. `mise run test` runs unit tests; `mise run test-int`
-runs database tests. CI preserves that Nextest split and supplies a disposable
-PostgreSQL service. Integration coverage includes concurrent claiming, dependency
-cycles and unblocking, human resolution, ownership, and event history.
+Integration tests use testcontainers to start a separate PostgreSQL 17 container
+per test, apply the application migrations, and remove the container when the test
+finishes. Ports are allocated dynamically; tests never read `DATABASE_URL`. Docker
+must be accessible, and the first run pulls `postgres:17` if needed. No external
+database or database-creation role is required. `mise run test` runs unit tests
+without Docker; `mise run test-int` runs container-backed database tests. CI retains
+that Nextest split and uses the runner’s Docker daemon. Integration coverage
+includes concurrent claiming, dependency cycles and unblocking, human resolution,
+ownership, and event history.
 
 The repository retains pinned tooling, Nextest archives, formatting and Clippy
 policy, dependency auditing, Renovate, release automation, signed release assets,

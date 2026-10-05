@@ -1,8 +1,12 @@
 use ledger::{Error, IssueKind, IssueStatus, Ledger, NewIssue, PeerKind};
-use sqlx::PgPool;
+#[path = "../../../tests/support/mod.rs"]
+mod support;
+use support::TestDatabase;
 
-#[sqlx::test(migrations = "../../migrations")]
-async fn lifecycle_and_history(pool: PgPool) {
+#[tokio::test]
+async fn lifecycle_and_history() {
+    let database = TestDatabase::start().await.unwrap();
+    let pool = database.pool.clone();
     let ledger = Ledger::from_pool(pool.clone());
     let human = ledger.ensure_peer("human", PeerKind::Human).await.unwrap();
     let agent = ledger.ensure_peer("agent", PeerKind::Agent).await.unwrap();
@@ -61,9 +65,10 @@ async fn lifecycle_and_history(pool: PgPool) {
     ));
 }
 
-#[sqlx::test(migrations = "../../migrations")]
-async fn concurrent_claims_are_unique(pool: PgPool) {
-    let ledger = Ledger::from_pool(pool);
+#[tokio::test]
+async fn concurrent_claims_are_unique() {
+    let database = TestDatabase::start().await.unwrap();
+    let ledger = Ledger::from_pool(database.pool.clone());
     let human = ledger.ensure_peer("human", PeerKind::Human).await.unwrap();
     let mut agents = Vec::new();
     for i in 0..16 {
@@ -96,9 +101,10 @@ async fn concurrent_claims_are_unique(pool: PgPool) {
     assert!(ledger.list_ready_issues().await.unwrap().is_empty());
 }
 
-#[sqlx::test(migrations = "../../migrations")]
-async fn dependencies_children_and_humans(pool: PgPool) {
-    let ledger = Ledger::from_pool(pool);
+#[tokio::test]
+async fn dependencies_children_and_humans() {
+    let database = TestDatabase::start().await.unwrap();
+    let ledger = Ledger::from_pool(database.pool.clone());
     let human = ledger.ensure_peer("human", PeerKind::Human).await.unwrap();
     let agent = ledger.ensure_peer("agent", PeerKind::Agent).await.unwrap();
     let parent = ledger
@@ -185,9 +191,10 @@ async fn dependencies_children_and_humans(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "../../migrations")]
-async fn backlog_failure_cancel_and_approval(pool: PgPool) {
-    let ledger = Ledger::from_pool(pool);
+#[tokio::test]
+async fn backlog_failure_cancel_and_approval() {
+    let database = TestDatabase::start().await.unwrap();
+    let ledger = Ledger::from_pool(database.pool.clone());
     let human = ledger.ensure_peer("human", PeerKind::Human).await.unwrap();
     let agent = ledger.ensure_peer("agent", PeerKind::Agent).await.unwrap();
     let mut new = NewIssue::task("backlog");
@@ -241,9 +248,10 @@ async fn backlog_failure_cancel_and_approval(pool: PgPool) {
     ));
 }
 
-#[sqlx::test(migrations = "../../migrations")]
-async fn concurrent_cycle_and_completion_races(pool: PgPool) {
-    let ledger = Ledger::from_pool(pool);
+#[tokio::test]
+async fn concurrent_cycle_and_completion_races() {
+    let database = TestDatabase::start().await.unwrap();
+    let ledger = Ledger::from_pool(database.pool.clone());
     let human = ledger.ensure_peer("human", PeerKind::Human).await.unwrap();
     let a = ledger
         .create_issue(human.id, NewIssue::task("a"))

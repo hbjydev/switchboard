@@ -99,7 +99,7 @@ cargo nextest run \
 '''
 
 [tasks.test-int]
-description = "Run PostgreSQL integration tests (requires a disposable DATABASE_URL)"
+description = "Run PostgreSQL integration tests (requires Docker)"
 run = '''
 cargo nextest run \
     --workspace \

@@ -16,8 +16,9 @@
 - Preserve useful repository tooling and CI. Mise pins tools; tasks live in
   `.mise/config.toml`.
 - Verify with `cargo fmt --all`, workspace Clippy, and workspace tests. PostgreSQL
-  tests must use a disposable server with a role allowed to create databases;
-  never point integration tests at a user's real resources. Database test binary
+  tests use testcontainers with an isolated PostgreSQL container per test and
+  must not read `DATABASE_URL` or target a user's real resources. Docker is required
+  only for integration test execution. Database test binary
   names begin with `integration` for the Nextest CI split.
 - Keep changes on a task branch. Do not commit, push, or merge without instruction.
 - Large, well-specified work may be delegated; independently verify shared results.
