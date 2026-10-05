@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.1.2](https://github.com/hbjydev/switchboard/compare/0.1.1...0.1.2) (2026-10-05)
+
+
+### Features
+
+* add AgentBackend and local Pi RPC execution ([6e73edc](https://github.com/hbjydev/switchboard/commit/6e73edc433b65bbef2ea8b3a4e7d9755bac2ec1f))
+* add AgentBackend and local Pi RPC execution ([835f34f](https://github.com/hbjydev/switchboard/commit/835f34f9446dcd0e79c536ccf83cc35f1b43ab61))
+* add leased and fenced execution recovery ([49c6ff1](https://github.com/hbjydev/switchboard/commit/49c6ff13ce81adc33a63af26802409aa14ef9450))
+* make worker execution leased, fenced, and recoverable ([c64d8a6](https://github.com/hbjydev/switchboard/commit/c64d8a63297a9d4f82d4e655436bc2078a8b7167))
+* replace application with ledger-driven worker runtime ([11eac75](https://github.com/hbjydev/switchboard/commit/11eac7504d67e630cade543974173c603a8295ab))
+* replace application with Ledger-driven worker runtime ([9d3581e](https://github.com/hbjydev/switchboard/commit/9d3581ec95484978886eec86b0d103cce08bee57))
+
+
+### Bug Fixes
+
+* resolve RPC fixture executable paths at runtime ([64a0e65](https://github.com/hbjydev/switchboard/commit/64a0e658f65cc5f8576a8373159421c1494c53e5))
+
+
+### Documentation
+
+* add Switchboard SVG and PNG logo assets ([72c4b7e](https://github.com/hbjydev/switchboard/commit/72c4b7e7f714e5d7cc2db77744e07163d85d2c47))
+* add Switchboard SVG and PNG logo assets ([6596b5c](https://github.com/hbjydev/switchboard/commit/6596b5c7d7992c90e1b4ab91377fcfad82fc67dc))
+
+
+### Tests
+
+* provision integration databases with testcontainers ([8b6b766](https://github.com/hbjydev/switchboard/commit/8b6b7668da07bed80d033252a80422886eb5603c))
+
+
+### Build System
+
+* add postgres dev container ([bc2e11c](https://github.com/hbjydev/switchboard/commit/bc2e11c614f5d3daf83d1a14bd7ead99712c8161))
+
 ## [0.1.1](https://github.com/hbjydev/switchboard/compare/0.1.0...0.1.1) (2026-10-03)
 
 
