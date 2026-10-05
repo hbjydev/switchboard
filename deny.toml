@@ -10,7 +10,18 @@ ignore = []
 [licenses]
 version = 2
 confidence-threshold = 0.9
-allow = ["Apache-2.0", "MIT", "Unicode-3.0", "Unlicense"]
+# SQLx/rustls transitive code and Mozilla CA certificate data use these
+# permissive licenses in addition to the workspace's Apache-2.0 license.
+allow = [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
 exceptions = []
 
 [bans]
@@ -22,8 +33,7 @@ workspace-default-features = "allow"
 external-default-features = "allow"
 allow = []
 
-# Use rustls for TLS. Permit OpenSSL only for WebAuthn attestation, where
-# webauthn-rs-core requires it unconditionally.
+# Use rustls for TLS; provider and platform native TLS dependencies are unnecessary.
 deny = [{ crate = "openssl-sys" }, { crate = "native-tls" }]
 
 skip = []

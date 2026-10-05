@@ -54,14 +54,6 @@ jobs:
       - run: mise run test-archive
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: nextest-e2e
-          path: |
-            target/nextest/e2e.tar.zst
-            target/nextest/switchboard
-          retention-days: 1
-          compression-level: 1
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
           name: nextest-workspace
           path: target/nextest/workspace.tar.zst
           retention-days: 1
@@ -98,6 +90,23 @@ jobs:
     runs-on: ubuntu-26.04
     permissions:
       contents: read
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: switchboard_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d switchboard_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Disposable CI server: sqlx::test creates a separate database per test.
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/switchboard_test
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup-repo
@@ -137,9 +146,7 @@ jobs:
     steps:
       # cancelled counts as failed: !cancelled() above still runs this job when
       # individual needs were cancelled but the run was not, and a required job
-      # that never reached a verdict must not clear the merge gate. The e2e
-      # matrix is fail-fast: false across seventeen shards, so a superseded push
-      # cancelling them is the common case, not a corner one.
+      # that never reached a verdict must not clear the merge gate.
       - name: Any jobs failed?
         if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
         run: |

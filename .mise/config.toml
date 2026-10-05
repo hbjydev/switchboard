@@ -47,9 +47,14 @@ set -eu
 # the worst offender — so a NEW overly-complex function fails immediately
 # even while the legacy offenders are still being paid down. Refactored one
 # under the threshold? Lower BUDGET to match (the task reminds you).
-BUDGET=28
-COUNT=$(cargo clippy --workspace --all-targets --all-features --locked -q -- -W clippy::cognitive_complexity 2>&1 \
-  | grep -A1 'cognitive complexity of' | grep -oE '[-]{2}> [^ ]+' | sort -u | wc -l)
+BUDGET=0
+REPORT=$(mktemp)
+trap 'rm -f "$REPORT"' EXIT
+if ! cargo clippy --workspace --all-targets --all-features --locked -q -- -W clippy::cognitive_complexity >"$REPORT" 2>&1; then
+  cat "$REPORT"
+  exit 1
+fi
+COUNT=$(grep -c 'cognitive complexity of' "$REPORT" || true)
 echo "==> functions above the cognitive-complexity threshold: $COUNT (budget: $BUDGET)"
 if [ "$COUNT" -gt "$BUDGET" ]; then
   echo "error: cognitive-complexity offenders grew ($COUNT > $BUDGET)." >&2
@@ -72,10 +77,10 @@ run = "mise run fmt -- --check"
 
 [tasks.check]
 description = "Run all CI checks locally"
-depends = ["lint", "test", "doc", "audit"]
+depends = ["lint", "test", "test-int", "doc", "audit"]
 
 [tasks.clippy]
-description = "Run all CI checks locally"
+description = "Lint the Rust workspace"
 run = "cargo clippy --workspace --all-targets --all-features --locked -- -D warnings"
 
 [tasks.lint]
@@ -83,22 +88,24 @@ description = "Run fmt-check, clippy"
 depends = ["fmt-check", "clippy"]
 
 [tasks.test]
-description = "Run tests with nextest"
+description = "Run unit tests with nextest"
 run = '''
 cargo nextest run \
     --workspace \
     --all-features \
     --no-fail-fast \
+    --locked \
     -E 'not binary(/^integration/)'
 '''
 
 [tasks.test-int]
-description = "Run tests with nextest"
+description = "Run PostgreSQL integration tests (requires a disposable DATABASE_URL)"
 run = '''
 cargo nextest run \
     --workspace \
     --all-features \
     --no-fail-fast \
+    --locked \
     -E 'binary(/^integration/)'
 '''
 
@@ -124,7 +131,6 @@ description = "Run integration tests from the pre-built archive `test-archive` b
 run = '''
 cargo-nextest nextest run --profile ci --workspace-remap . \
     --archive-file "{{ config_root }}/target/nextest/workspace.tar.zst" \
-    --run-ignored all \
     -E 'binary(/^integration/)'
 '''
 
@@ -138,7 +144,7 @@ env = { RUSTDOCFLAGS = "-D warnings" }
 run = "cargo doc --workspace --all-features --no-deps"
 
 [tasks.build-docker]
-description = "Build docker image for the API"
+description = "Build Docker image for the Ledger CLI and worker"
 env = { RUST_VERSION = { tools = true, value = "{{ tools.rust.version }}" } }
 usage = """
 flag "--tag <tag>" help="The tag to build the docker image with" default="dev"

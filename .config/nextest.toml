@@ -3,7 +3,3 @@ fail-fast = false
 
 [profile.ci.junit]
 path = "junit.xml"
-
-[profile.e2e]
-retries = 2
-test-threads = 1
