@@ -8,7 +8,9 @@ provider, API key, or model installation is required.
 
 Every actionable item is an Issue, including Tasks, Questions, and Approvals.
 Issues carry state, identity, hierarchy, dependencies, and structured lifecycle
-history. Human and agent Peers are durable identities, independent of providers.
+history. Human and agent Peers are durable identities, independent of providers. Each
+claim creates a durable ExecutionAttempt with a finite lease and a unique fencing
+ID, so a disappeared worker can be recovered without accepting its late result.
 
 ## Prerequisites and database
 
@@ -85,6 +87,8 @@ cargo run -- issue create --title "A simple task"
 cargo run -- issue list --ready
 cargo run -- issue show ISSUE_UUID
 cargo run -- issue events ISSUE_UUID
+cargo run -- issue attempts ISSUE_UUID
+cargo run -- worker recover
 cargo run -- issue create --title "Later work" --backlog
 cargo run -- issue ready ISSUE_UUID
 cargo run -- issue depend ISSUE_UUID DEPENDENCY_UUID
@@ -99,7 +103,36 @@ description beginning with `fail:` produces an explainable execution failure.
 These are fixture conventions, not a prompt language. `issue create` also accepts
 `--kind question|approval`, `--description`, and `--priority` (higher runs first).
 Use `issue answer` to resolve human issues. Manual task completion applies to
-Ready work; worker-owned execution uses claimant-checked Ledger operations.
+Ready work; worker-owned execution uses attempt-fenced Ledger operations. `issue show` includes
+`current_attempt_id`; `issue attempts` prints each attempt's peer, state, timestamps,
+and lease expiry. Historical attempts remain available after recovery or completion.
+
+## Leases and worker recovery
+
+Claims lease work for 30 seconds by default. Configure the duration for claims and
+renewals with global `--lease-seconds` or `SWITCHBOARD_LEASE_SECONDS` (CLI: 1–86400
+seconds; Ledger API: 3 milliseconds–1 day):
+
+```bash
+cargo run -- --lease-seconds 60 worker run --agent another-worker
+cargo run -- worker recover
+cargo run -- issue attempts ISSUE_UUID
+```
+
+Workers renew every third of the lease duration while loading context and awaiting
+execution. Every tick recovers expired Claimed/Running work before claiming; a
+polling worker therefore repairs disappeared workers automatically. `worker recover`
+also runs recovery explicitly without executing work. An idle worker that already
+exited with `--until-idle` cannot perform later recovery; start another worker or
+run maintenance. Recovery preserves the expired attempt and returns the Issue to
+Ready (or waiting if prerequisites require it). Reclaiming creates a new attempt,
+even when the same Peer returns. Late completions, failures, and child/human
+handoffs from previous attempts are rejected.
+
+A heartbeat failure ends the tick with an error and drops the execution future;
+no detached heartbeat task survives. Completing or handing off work closes the
+attempt transactionally. Repeating an outcome conflicts before adding events or
+children. Heartbeats update attempt rows without flooding Issue events.
 
 ## Workspace
 
@@ -131,7 +164,8 @@ database or database-creation role is required. `mise run test` runs unit tests
 without Docker; `mise run test-int` runs container-backed database tests. CI retains
 that Nextest split and uses the runner’s Docker daemon. Integration coverage
 includes concurrent claiming, dependency cycles and unblocking, human resolution,
-ownership, and event history.
+attempt fencing, lease renewal and recovery races, long-running worker heartbeats,
+and event history.
 
 The repository retains pinned tooling, Nextest archives, formatting and Clippy
 policy, dependency auditing, Renovate, release automation, signed release assets,
@@ -141,8 +175,8 @@ and a nonroot container build. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 - The executor is deterministic. There are no provider integrations or software
   editing tools.
-- Claims have no leases or automatic crash recovery. Interrupted work can remain
-  Claimed or Running; inspect history, cancel it, and create replacement work.
+- Lease recovery retries interrupted work, but explicit Failed work still needs
+  human intervention. There is no retry budget or backoff for repeated crashes.
 - Dependency and lifecycle mutations use a coarse transaction advisory lock.
   Concurrent claims remain safe; write throughput is intentionally modest.
 - Only Completed satisfies dependencies. Failed or Cancelled prerequisites leave
@@ -150,9 +184,10 @@ and a nonroot container build. See [CONTRIBUTING.md](CONTRIBUTING.md).
 - Approval resolution records decision text without enforcing approve/reject
   policy. Peer identity is not authentication; the CLI assumes trusted callers.
 - No HTTP frontend, chat integration, distributed scheduler, Swarm, memory system,
-  automatic retry, or elaborate permissions are implemented.
+  general retry policy, or elaborate permissions are implemented.
 
 See [the architecture note](docs/architecture.md) for state semantics, transaction
-boundaries, and open design questions. The next useful work is claim recovery,
-execution idempotency, then a narrowly scoped real executor behind the existing
-provider-independent boundary.
+boundaries, and open design questions. Before adding a real executor, external effects need durable idempotency and
+checkpointing: use `(attempt_id, operation identity)` for each effect within one
+attempt. This milestone fences Ledger writes; it cannot undo an external effect
+already performed by a worker that later loses its lease.

@@ -10,6 +10,12 @@
   append-only events belong in the same database transaction.
 - Claims must remain atomic under PostgreSQL concurrency. Preserve advisory-lock
   ordering and `FOR UPDATE SKIP LOCKED` semantics when changing persistence.
+- Worker mutations must be fenced by the active, unexpired ExecutionAttempt ID,
+  never only by PeerId. Preserve one active attempt per Issue, lock ordering,
+  transactional outcome application, and attempt history through recovery.
+- Use database time for lease authority. Heartbeats must stop with execution;
+  recovery clears ownership and rechecks dependencies. Side-effect idempotency
+  will use `(attempt_id, operation identity)`; Peer identity is not an attempt.
 - Parentage and dependencies are distinct. Only Completed satisfies a dependency;
   completing prerequisites must automatically reconsider waiting dependents.
 - Questions and Approvals are ordinary Ledger issues resolved by humans.

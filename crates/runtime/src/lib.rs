@@ -2,7 +2,7 @@
 
 use std::future::Future;
 
-use ledger::{Issue, IssueKind, Ledger, NewIssue, PeerId};
+use ledger::{AttemptId, Issue, IssueKind, Ledger, NewIssue, PeerId};
 
 /// The durable agent identity is independent of its executor implementation.
 #[derive(Clone, Debug)]
@@ -12,6 +12,8 @@ pub struct Agent {
 
 /// Snapshot of durable context; executors do not maintain hidden task state.
 pub struct ExecutionContext {
+    /// Durable scope for future side effects: `(attempt_id, operation identity)`.
+    pub attempt_id: AttemptId,
     pub children: Vec<Issue>,
 }
 
@@ -89,40 +91,62 @@ impl<E: Executor> Worker<E> {
         }
     }
 
-    /// Process one runnable issue, returning its persisted final state, or idle.
+    /// Recover expired work and process one issue, returning its persisted state, or idle.
     /// Ledger errors propagate: no failed persistence is mistaken for successful work.
     pub async fn tick(&self) -> Result<Option<Issue>, ledger::Error> {
-        let actor = self.agent.peer_id;
-        let Some(issue) = self.ledger.claim_next_issue(actor).await? else {
+        self.ledger.recover_expired_attempts().await?;
+        let Some(claim) = self.ledger.claim_next_issue(self.agent.peer_id).await? else {
             return Ok(None);
         };
-        let issue = self.ledger.mark_running(issue.id, actor).await?;
-        let context = ExecutionContext {
-            children: self.ledger.children(issue.id).await?,
+        let attempt_id = claim.attempt.id;
+        let issue = self.ledger.mark_running(attempt_id).await?;
+        let execution = async {
+            let context = ExecutionContext {
+                attempt_id,
+                children: self.ledger.children(issue.id).await?,
+            };
+            Ok::<_, ledger::Error>(self.executor.execute(&issue, context).await)
         };
-        match self.executor.execute(&issue, context).await {
+
+        // The timer lives in this tick: canceling the execution also stops renewal.
+        // Delay the first heartbeat, since claiming already established a lease.
+        let period = self.ledger.lease_duration() / 3;
+        let mut heartbeats = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        heartbeats.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        tokio::pin!(execution);
+        let outcome = loop {
+            tokio::select! {
+                biased;
+                _ = heartbeats.tick() => {
+                    self.ledger.heartbeat(attempt_id).await?;
+                }
+                result = &mut execution => break result?,
+            }
+        };
+
+        match outcome {
             ExecutionOutcome::Completed => {
-                self.ledger.complete_issue(issue.id, actor).await?;
+                return self.ledger.complete_attempt(attempt_id).await.map(Some);
             }
             ExecutionOutcome::Failed { reason } => {
-                self.ledger.fail_issue(issue.id, actor, &reason).await?;
+                return self
+                    .ledger
+                    .fail_attempt(attempt_id, &reason)
+                    .await
+                    .map(Some);
             }
             ExecutionOutcome::CreatedChildWork {
                 issue: child,
                 blocking,
             } => {
                 self.ledger
-                    .create_child_issue(issue.id, actor, child, blocking)
+                    .create_child_for_attempt(attempt_id, child, blocking)
                     .await?;
-                if !blocking {
-                    self.ledger.complete_issue(issue.id, actor).await?;
-                }
             }
             ExecutionOutcome::NeedsHumanInput { title, description } => {
                 self.ledger
-                    .create_child_issue(
-                        issue.id,
-                        actor,
+                    .create_child_for_attempt(
+                        attempt_id,
                         NewIssue {
                             title,
                             description,

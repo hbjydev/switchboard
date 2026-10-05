@@ -1,8 +1,10 @@
 //! Persistent work and controlled lifecycle operations, independent of executors.
+mod execution;
 mod model;
 pub use model::*;
 use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
+use std::time::Duration;
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
@@ -23,17 +25,25 @@ pub enum Error {
     EmptyField(&'static str),
     #[error("peer name already belongs to a different kind")]
     PeerKindConflict,
+    #[error("execution attempt {0} has lost its lease or authority")]
+    ExecutionLost(AttemptId),
+    #[error("lease duration must be between 3 milliseconds and 1 day")]
+    InvalidLeaseDuration,
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Clone)]
 pub struct Ledger {
     pool: PgPool,
+    lease_duration: Duration,
 }
 impl Ledger {
     #[must_use]
     pub const fn from_pool(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            lease_duration: Duration::from_secs(30),
+        }
     }
     pub async fn connect(url: &str) -> Result<Self> {
         Ok(Self::from_pool(PgPool::connect(url).await?))
@@ -63,8 +73,16 @@ impl Ledger {
         }
         Ok(peer)
     }
+    pub async fn peer(&self, id: PeerId) -> Result<Option<Peer>> {
+        Ok(sqlx::query_as("SELECT * FROM peers WHERE id=$1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?)
+    }
+    /// Human work intake. Execution-generated work uses `create_child_for_attempt`.
     pub async fn create_issue(&self, actor: PeerId, new: NewIssue) -> Result<Issue> {
         let mut tx = self.transaction(false).await?;
+        require_kind(&mut tx, actor, PeerKind::Human).await?;
         let issue = insert_issue(&mut tx, actor, new, None).await?;
         tx.commit().await?;
         Ok(issue)
@@ -108,59 +126,9 @@ impl Ledger {
                 .await?,
         )
     }
-    pub async fn claim_next_issue(&self, actor: PeerId) -> Result<Option<Issue>> {
-        self.claim(None, actor).await
-    }
-    pub async fn claim_issue(&self, id: IssueId, actor: PeerId) -> Result<Issue> {
-        match self.claim(Some(id), actor).await? {
-            Some(issue) => Ok(issue),
-            None => Err(Error::InvalidTransition(self.get_issue(id).await?.status)),
-        }
-    }
-    async fn claim(&self, id: Option<IssueId>, actor: PeerId) -> Result<Option<Issue>> {
-        let mut tx = self.transaction(true).await?;
-        require_kind(&mut tx, actor, PeerKind::Agent).await?;
-        let issue: Option<Issue> = sqlx::query_as("SELECT * FROM issues WHERE status='Ready' AND kind='Task' AND ($1::uuid IS NULL OR id=$1) ORDER BY priority DESC,created_at,id FOR UPDATE SKIP LOCKED LIMIT 1")
-            .bind(id).fetch_optional(&mut *tx).await?;
-        let result = if let Some(issue) = issue {
-            Some(
-                set_state(
-                    &mut tx,
-                    &issue,
-                    IssueStatus::Claimed,
-                    Some(actor),
-                    actor,
-                    "IssueClaimed",
-                    json!({}),
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
-        tx.commit().await?;
-        Ok(result)
-    }
-    pub async fn mark_running(&self, id: IssueId, actor: PeerId) -> Result<Issue> {
-        let mut tx = self.transaction(false).await?;
-        let issue = locked_issue(&mut tx, id).await?;
-        owned(&issue, actor)?;
-        require_status(&issue, &[IssueStatus::Claimed])?;
-        let result = set_state(
-            &mut tx,
-            &issue,
-            IssueStatus::Running,
-            Some(actor),
-            actor,
-            "IssueStarted",
-            json!({}),
-        )
-        .await?;
-        tx.commit().await?;
-        Ok(result)
-    }
     pub async fn make_ready(&self, id: IssueId, actor: PeerId) -> Result<Issue> {
         let mut tx = self.transaction(false).await?;
+        require_kind(&mut tx, actor, PeerKind::Human).await?;
         let issue = locked_issue(&mut tx, id).await?;
         require_status(&issue, &[IssueStatus::Backlog])?;
         let result = set_state(
@@ -178,15 +146,12 @@ impl Ledger {
         tx.commit().await?;
         Ok(result)
     }
+    /// Human completion of an unclaimed Ready task. Workers use `complete_attempt`.
     pub async fn complete_issue(&self, id: IssueId, actor: PeerId) -> Result<Issue> {
         let mut tx = self.transaction(false).await?;
         let issue = locked_issue(&mut tx, id).await?;
-        require_status(&issue, &[IssueStatus::Ready, IssueStatus::Running])?;
-        if issue.status == IssueStatus::Running {
-            owned(&issue, actor)?;
-        } else {
-            require_kind(&mut tx, actor, PeerKind::Human).await?;
-        }
+        require_status(&issue, &[IssueStatus::Ready])?;
+        require_kind(&mut tx, actor, PeerKind::Human).await?;
         let result = finish(
             &mut tx,
             &issue,
@@ -199,24 +164,6 @@ impl Ledger {
         tx.commit().await?;
         Ok(result)
     }
-    pub async fn fail_issue(&self, id: IssueId, actor: PeerId, reason: &str) -> Result<Issue> {
-        nonempty(reason, "failure reason")?;
-        let mut tx = self.transaction(false).await?;
-        let issue = locked_issue(&mut tx, id).await?;
-        require_status(&issue, &[IssueStatus::Claimed, IssueStatus::Running])?;
-        owned(&issue, actor)?;
-        let result = finish(
-            &mut tx,
-            &issue,
-            actor,
-            IssueStatus::Failed,
-            "IssueFailed",
-            json!({"reason":reason}),
-        )
-        .await?;
-        tx.commit().await?;
-        Ok(result)
-    }
     pub async fn cancel_issue(&self, id: IssueId, actor: PeerId, reason: &str) -> Result<Issue> {
         nonempty(reason, "cancellation reason")?;
         let mut tx = self.transaction(false).await?;
@@ -224,9 +171,7 @@ impl Ledger {
         if issue.status.is_terminal() {
             return Err(Error::InvalidTransition(issue.status));
         }
-        if issue.owner != Some(actor) {
-            require_kind(&mut tx, actor, PeerKind::Human).await?;
-        }
+        require_kind(&mut tx, actor, PeerKind::Human).await?;
         let result = finish(
             &mut tx,
             &issue,
@@ -272,6 +217,7 @@ impl Ledger {
         actor: PeerId,
     ) -> Result<()> {
         let mut tx = self.transaction(false).await?;
+        require_kind(&mut tx, actor, PeerKind::Human).await?;
         add_dependency(&mut tx, id, dependency, actor).await?;
         tx.commit().await?;
         Ok(())
@@ -284,8 +230,9 @@ impl Ledger {
         blocking: bool,
     ) -> Result<Issue> {
         let mut tx = self.transaction(false).await?;
+        require_kind(&mut tx, actor, PeerKind::Human).await?;
         let issue = locked_issue(&mut tx, parent).await?;
-        editable(&issue, actor)?;
+        editable(&issue)?;
         let child = insert_issue(&mut tx, actor, new, Some(parent)).await?;
         event(
             &mut tx,
@@ -316,19 +263,9 @@ fn require_status(issue: &Issue, allowed: &[IssueStatus]) -> Result<()> {
         Err(Error::InvalidTransition(issue.status))
     }
 }
-fn owned(issue: &Issue, actor: PeerId) -> Result<()> {
-    if issue.owner == Some(actor) {
-        Ok(())
-    } else {
-        Err(Error::IneligibleActor)
-    }
-}
-fn editable(issue: &Issue, actor: PeerId) -> Result<()> {
+fn editable(issue: &Issue) -> Result<()> {
     if issue.status.is_terminal() || issue.kind != IssueKind::Task {
         return Err(Error::InvalidTransition(issue.status));
-    }
-    if matches!(issue.status, IssueStatus::Claimed | IssueStatus::Running) {
-        owned(issue, actor)?;
     }
     Ok(())
 }
@@ -401,16 +338,29 @@ async fn set_state(
     kind: &str,
     mut metadata: Value,
 ) -> Result<Issue> {
+    let active = matches!(status, IssueStatus::Claimed | IssueStatus::Running);
+    if !active {
+        let state = match status {
+            IssueStatus::Completed => AttemptState::Completed,
+            IssueStatus::Failed => AttemptState::Failed,
+            _ => AttemptState::Cancelled,
+        };
+        execution::end_attempt(db, issue, state, actor).await?;
+    }
     if let Some(fields) = metadata.as_object_mut() {
+        if let Some(attempt_id) = issue.current_attempt_id {
+            fields.insert("attempt_id".to_owned(), json!(attempt_id));
+        }
         fields.insert("from".to_owned(), json!(issue.status));
         fields.insert("to".to_owned(), json!(status));
     }
     let updated = sqlx::query_as(
-        "UPDATE issues SET status=$2,owner=$3,updated_at=clock_timestamp() WHERE id=$1 RETURNING *",
+        "UPDATE issues SET status=$2,owner=$3,current_attempt_id=$4,updated_at=clock_timestamp() WHERE id=$1 RETURNING *",
     )
     .bind(issue.id)
     .bind(status)
     .bind(owner)
+    .bind(if active { issue.current_attempt_id } else { None })
     .fetch_one(&mut *db)
     .await?;
     event(db, issue.id, actor, kind, metadata).await?;
@@ -443,7 +393,7 @@ async fn add_dependency(
     actor: PeerId,
 ) -> Result<()> {
     let issue = locked_issue(db, id).await?;
-    editable(&issue, actor)?;
+    editable(&issue)?;
     locked_issue(db, dependency).await?;
     let cycle:bool=sqlx::query_scalar("WITH RECURSIVE reachable(id) AS (SELECT $1::uuid UNION SELECT d.dependency_id FROM issue_dependencies d JOIN reachable r ON d.issue_id=r.id) SELECT EXISTS(SELECT 1 FROM reachable WHERE id=$2)")
         .bind(dependency).bind(id).fetch_one(&mut *db).await?;

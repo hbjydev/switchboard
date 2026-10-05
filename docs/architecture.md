@@ -11,6 +11,10 @@ requiring event replay or introducing full event sourcing.
 A Peer is a durable human or agent identity. It has no model or provider. The
 runtime's Agent and Executor describe who performs work and how execution runs;
 future provider adapters belong behind the executor boundary, outside the domain.
+An ExecutionAttempt is one claim of one Issue by a Peer. A Peer may execute the
+same Issue repeatedly; every claim gets a new AttemptId. The Issue remains the
+authoritative business state, while attempt rows explain individual executions.
+`Issue.current_attempt_id` points only to a currently active attempt.
 
 ## Components
 
@@ -38,7 +42,7 @@ ordinary Ledger work. A scheduling hierarchy is unnecessary for this milestone.
 | Failed | Execution failed, with a recorded explanation. |
 | Cancelled | Work was explicitly abandoned. |
 
-Domain operations validate transitions and claimant ownership. They update state
+Domain operations validate transitions and active execution-attempt authority. They update state
 and append structured events in the same transaction. Callers cannot assign an
 arbitrary status through the Ledger API. Workers do not execute Questions or
 Approvals.
@@ -47,7 +51,9 @@ Approvals.
 
 Ready Tasks are ordered by descending priority, creation time, then ID.
 `claim_next_issue` uses PostgreSQL row locks with `FOR UPDATE SKIP LOCKED` and
-updates the selected row and event history in one transaction. Concurrent
+creates a leased attempt, updates the Issue's current attempt and owner, and appends
+IssueClaimed/ExecutionClaimed events in one transaction. It returns a Claim containing
+the Issue and attempt, including the lease expiry. Concurrent
 workers cannot successfully claim the same issue. Direct claims enforce the
 same eligibility and ownership rules.
 
@@ -82,22 +88,92 @@ Approvals currently carry decision text; there is no enforced approve/reject
 policy. Applications requiring authorization semantics must add that policy
 before treating an Approval as permission to perform a sensitive action.
 
-## Execution and recovery
+## Execution attempts, leases, and fencing
 
-The worker claims, starts, executes, then applies a structured outcome. The fake
-executor exercises child work and human input using persisted Ledger state, so
-restarting a worker does not lose the demo's progress. No LLM, provider account,
-conversation session, or external tool is needed.
+Attempt states are Claimed, Running, Completed, Failed, Expired, and Cancelled.
+Completed means the invocation's outcome was applied: the Issue may have completed
+or handed off to blocking child work/human input. Resuming that Issue creates a new
+attempt. Administrative cancellation or a new blocking dependency cancels the active
+attempt. No active attempt remains attached to waiting or terminal work.
 
-There are no claim leases, retries, or automatic recovery of an interrupted
-Running issue. A crash can leave work Claimed or Running; cancel it explicitly
-and create replacement work after inspecting history. The process is intended
-for trusted local peers; peer IDs are not authentication credentials.
+Migration 0002 adds execution_attempts and current_attempt_id without changing 0001.
+A partial unique index permits at most one Claimed/Running attempt per Issue,
+including attempts whose leases have elapsed but are not yet recovered. A composite
+foreign key ensures the current attempt belongs to that Issue; an Issue check
+requires a current attempt exactly when Claimed/Running. Attempt constraints require
+finished_at exactly for terminal attempts. Existing Claimed/Running issues receive
+an immediately expiring attempt and an adoption event, so upgrading permits recovery
+without erasing prior Issue history.
+
+Leases default to 30 seconds; Ledger handles accept 3 milliseconds–1 day via
+with_lease_duration, and the CLI exposes --lease-seconds / SWITCHBOARD_LEASE_SECONDS.
+PostgreSQL clock_timestamp() determines claim expiry, validation, renewal, and
+recovery after lock acquisition. Worker timers only schedule renewals; they do not
+determine authority. Ledger tests expire rows explicitly, rather than sleep and
+assume a lease elapsed.
+
+mark_running, heartbeat, complete_attempt, fail_attempt, and
+create_child_for_attempt take AttemptId rather than PeerId. Each transaction locks
+in this order: advisory lock, Issue row, attempt row. It validates the Issue's
+current attempt, owner, active states, and unexpired lease using database time
+before writing. A known Peer returning with an old attempt cannot renew or mutate
+the Issue, including before recovery. IDs assume trusted callers and are not
+authentication credentials. Human administration uses human-only operations without
+requiring an attempt; the agent Peer-only mutation path cannot bypass fencing. Root work intake through
+create_issue is human-only; execution-generated Tasks, Questions, and Approvals
+use the fenced child/handoff operation.
+
+Terminal outcome application is transactional. A child or human-input outcome
+inserts the child, records the handoff, adds any blocking dependency, and ends the
+attempt in the same transaction. A nonblocking child outcome completes the parent.
+Replays return ExecutionLost before adding a child or contradictory terminal event;
+there is deliberately no terminal-result cache. ExecutionClaimed, ExecutionStarted,
+ExecutionCompleted/Failed/Cancelled/Expired and ExecutionRecovered explain attempts
+alongside existing Issue events. All execution events include attempt_id. Heartbeats
+update heartbeat_at and lease_expires_at on the attempt only, avoiding event noise.
+
+## Worker heartbeats and recovery
+
+The worker recovers expired work, claims, starts, loads durable context, executes,
+then applies an outcome. ExecutionContext includes attempt_id and persisted children;
+the Executor remains provider-independent. An inline Tokio select renews at one
+third of the lease duration while context loading and execute() are pending. The
+first renewal is delayed, missed ticks use Delay, and renewal wins simultaneous
+readiness. No detached heartbeat task exists: dropping the tick or a failed renewal
+drops the execution future and timer. Renewal failure propagates; ExecutionLost
+clearly identifies lost authority. Applying an outcome still checks authority, even
+if no heartbeat observed the loss. Providers must later respect cancellation; dropping
+a future cannot undo effects or stop tasks detached by a provider.
+
+recover_expired_attempts is explicit and called before each worker claim. It takes
+the existing exclusive graph/lifecycle lock, locks expired Claimed/Running Issues,
+marks their attempts Expired, clears current_attempt_id and owner, and readies the
+Issue with a structured recovery event. It recomputes dependencies in the same
+transaction. Claims/heartbeats take shared advisory locks; recovery never upgrades
+a shared lock, so claims, renewals, and recovery cannot race their authority changes.
+Recovery and claim are separate transactions: any worker may win the new claim.
+The partial unique index remains a database backstop. worker recover exposes
+maintenance without execution; normal polling workers also perform recovery.
+
+The deterministic executor's child/question lifecycle persists through worker
+restarts. Claims and recoveries require no LLM, provider account, conversation
+session, or external tool. The coarse locking strategy prioritizes correctness and
+may delay renewals under heavy write contention; lease duration should leave headroom.
+
+## Idempotency boundary
+
+Side effects on behalf of an attempt should use `(attempt_id, operation identity)`
+as their durable idempotency scope. The stable attempt ID is available to Executor
+implementations now. A reclaimed execution has a different scope; avoiding duplicate
+external effects across attempts additionally requires durable business-operation
+identity/checkpoints or reconciliation. Ledger fencing prevents stale database
+outcomes, not external effects already in flight. No external tool or generic
+idempotency subsystem is introduced here.
 
 ## Open questions and future boundaries
 
-1. Claim leases, fencing, heartbeats, and recovery of interrupted execution.
-2. Idempotent executor effects and durable checkpointing beyond Ledger mutations.
+1. Idempotent external effects, cancellation contracts, and durable checkpoints.
+2. Retry budgets/backoff for repeated crashes and explicit failed work.
 3. Richer human decisions, rejection, reassignment, and failed dependency handling.
 4. Agent capability selection and fairness without coupling identity to providers.
 5. Provider adapters and execution tools behind the Executor boundary.
